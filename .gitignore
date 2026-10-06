@@ -1,0 +1,19 @@
+# ---- 敏感: API key / 个人配置 ----
+llm.json                # 模型 API 配置(含 key), 页面"模型API"面板生成
+
+# ---- 个人数据(关注表/封面/更新/日志), 不进公共仓库 ----
+watchlist.csv
+unfollowed.csv
+events.csv
+updates.json
+report.html
+add_log.txt
+covers/
+media/
+_x_out.json
+_x_err.txt
+.pull.lock
+
+# ---- 运行时 ----
+__pycache__/
+*.pyc
