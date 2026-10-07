@@ -23,6 +23,25 @@ from datetime import datetime
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 GRAPH_PATH = os.path.join(BASE, "graph.json")
+TOKEN_PATH = os.path.join(BASE, "server_token.txt")   # 本地接口配对 token(不进 Git)
+
+
+def load_or_create_token():
+    """本地接口认证 token(FR-17~20 前置收紧)。
+    server.py 与 pull.py(嵌进报告页)共用同一文件; 缺失即生成 32 字节 hex。"""
+    try:
+        t = open(TOKEN_PATH, encoding="utf-8").read().strip()
+        if re.fullmatch(r"[0-9a-f]{32,128}", t):
+            return t
+    except OSError:
+        pass
+    import secrets
+    t = secrets.token_hex(16)
+    tmp = TOKEN_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(t)
+    os.replace(tmp, TOKEN_PATH)
+    return t
 
 # ---------- 事件类型 ----------
 
@@ -130,6 +149,37 @@ def classify_input(text):
             unknown.append(u)
     # 裸 handle 输入(如 @someone 或纯 handle)不算链接, 交给调用方
     return {"types": types, "links": links, "unknown": unknown}
+
+
+def classify_url(url):
+    """单 URL 预筛(FR-18 导入预览) -> {supported, type, reason, domain}。
+    不支持的链接给出明确原因与"保留后续支持入口", 不伪装成可导入。"""
+    u = (url or "").strip()
+    out = {"url": u, "supported": False, "type": "invalid",
+           "reason": "", "domain": ""}
+    if not re.match(r"https?://", u, re.I):
+        out["reason"] = "不是 http(s) 链接"
+        return out
+    mdom = re.match(r"https?://([^/:?#]+)", u, re.I)
+    out["domain"] = (mdom.group(1) if mdom else "").lower()
+    for t, pat in URL_PATS:
+        if pat.search(u):
+            out.update({"supported": True, "type": t, "reason": TYPE_LABEL.get(t, t)})
+            return out
+    d = out["domain"]
+    if "dlsite.com" in d:
+        out["type"] = "dlsite_unsupported"
+        out["reason"] = "DLsite 非作品页(社团页/商品页等)暂不支持, 已保留后续支持入口"
+    elif "x.com" in d or "twitter.com" in d:
+        out["type"] = "x_invalid"
+        out["reason"] = "X 链接需为帖子或主页(带 /status/ 或裸 handle)"
+    elif "steampowered.com" in d:
+        out["type"] = "steam_invalid"
+        out["reason"] = "Steam 链接需为 /app/<数字> 作品页"
+    else:
+        out["type"] = "unsupported"
+        out["reason"] = "暂不支持的站点(%s), 不会导入" % (d or "未知域名")
+    return out
 
 
 def record_input_error(g, inp, reason):

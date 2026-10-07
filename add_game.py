@@ -82,20 +82,31 @@ def extract_links(text):
     return out
 
 
-def _graph_add_candidate(g, url, platform, title, evidence, confidence, reason, row, handle):
-    """FR-03 低置信度候选入 graph.json 待确认列表。"""
+def _graph_add_candidate(g, url, platform, title, evidence, confidence, reason, row, handle,
+                         made=None):
+    """FR-03 低置信度候选入 graph.json 待确认列表。
+    made(可选): 收集本次新建候选的 URL, 供 FR-19 逐页结果标注'待确认'。"""
     try:
         cand, changed = MOD.add_candidate(g, url, platform, title=title, evidence=evidence,
                                           confidence=confidence, reason=reason,
                                           row=row, handle=handle)
+        if changed and cand and cand.get("status") == "pending" and made is not None:
+            made.append(url)
         return changed
     except Exception as ex:
         print("  [warn] 候选记录失败: %r" % ex)
         return False
 
 
-def add_one(url, rows):
-    """处理单个链接, 成功追加到 rows 返回 True; 重复/失败返回 False。"""
+def add_one(url, rows, out=None):
+    """处理单个链接, 成功追加到 rows 返回 True; 重复/失败返回 False。
+    out(FR-19 逐页结果, 可选): 会被填成
+      {'status': added|exists|unsupported|failed, 'reason': str, 'pending': [url...]}
+      status=exists 含"已存在/已关注"; pending=本次进入待确认列表的候选。"""
+    if out is None:
+        out = {}
+    out.update({"status": "failed", "reason": "", "pending": []})
+    made_pending = []   # 本次新建的待确认候选 URL
     handle = ""
     name = ""
     notes = ""
@@ -162,7 +173,7 @@ def add_one(url, rows):
                         evidence=[{"from": "X帖 %s" % notes, "retweet": lk.get("retweet", False)}],
                         confidence=conf,
                         reason="转发帖链接, 低置信" if lk.get("retweet") else "作者帖内外链",
-                        row="", handle=handle)
+                        row="", handle=handle, made=made_pending)
                     graph_dirty = True
                     # 非转发的平台外链直接并入本行 id 列表(同一作品多页, FR-04)
                     if not lk.get("retweet"):
@@ -196,7 +207,7 @@ def add_one(url, rows):
                             g, lk["url"], lk["platform"], title=",".join(ev["names"][:2]),
                             evidence=[{"from": "X简介", "retweet": False}],
                             confidence=0.85, reason="作者简介里的官方外链",
-                            row="", handle=handle)
+                            row="", handle=handle, made=made_pending)
                         graph_dirty = True
                         for a in re.findall(r"store\.steampowered\.com/app/(\d+)", lk["url"]):
                             if a not in steam_apps:
@@ -226,11 +237,14 @@ def add_one(url, rows):
     if not (handle or steam_apps or dlsite_ids):
         # FR-01: 未识别的输入保留原链接与原因, 不再只 print 后丢弃
         first_line = url.split("\n")[0][:120]
-        MOD.record_input_error(g, first_line, "没识别出 X/Steam/DLsite 链接(类型: %s)" % type_label)
+        reason = "没识别出 X/Steam/DLsite 链接(类型: %s)" % type_label
+        MOD.record_input_error(g, first_line, reason)
         try:
             MOD.save_graph(g)
         except Exception:
             pass
+        out.update({"status": "unsupported", "reason": reason,
+                    "pending": made_pending})
         print("  跳过(没识别出 X/Steam/DLsite): %s" % first_line)
         return False
 
@@ -258,6 +272,8 @@ def add_one(url, rows):
                 MOD.save_graph(g)
             except Exception:
                 pass
+        out.update({"status": "exists", "reason": dup_reason,
+                    "pending": made_pending})
         return False
 
 
@@ -339,11 +355,71 @@ def add_one(url, rows):
         MOD.save_graph(g)
     except Exception as ex:
         print("  [warn] graph 落盘失败: %r" % ex)
+    out.update({"status": "added", "reason": "已添加: %s" % name,
+                "pending": made_pending, "name": name})
     print("  已添加: %s" % name)
     return True
 
 
+# ---------- FR-19: 逐页导入任务 ----------
+
+def job_path(job_id):
+    return os.path.join(BASE, "jobs", "%s.json" % job_id)
+
+
+def job_load(job_id):
+    if not re.fullmatch(r"[0-9a-f]{8,32}", job_id or ""):
+        raise ValueError("bad job id")
+    with open(job_path(job_id), encoding="utf-8") as f:
+        return json.load(f)
+
+
+def job_save(job):
+    p = job_path(job["id"])
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(job, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, p)
+
+
+def run_job(job_id):
+    """FR-19: 逐页处理任务, 每页处理完立即回写 jobs/<id>.json(可随时查进度)。
+    返回 0=全部处理完。页面状态: queued->processing->added/exists/unsupported/failed。"""
+    job = job_load(job_id)
+    rows = load_rows()
+    for idx, page in enumerate(job.get("pages") or []):
+        if page.get("status") not in ("queued", "processing"):
+            continue
+        u = page.get("url") or ""
+        page["status"] = "processing"
+        job_save(job)
+        # 先做本地预筛(FR-18): 不支持的页面直接标 unsupported, 不进网络流程
+        cls = MOD.classify_url(u)
+        if not cls["supported"]:
+            page.update({"status": "unsupported", "reason": cls["reason"]})
+            job_save(job)
+            continue
+        res = {}
+        try:
+            add_one(u, rows, out=res)
+            save_rows(rows)   # 每条即时落盘
+            page.update({"status": res.get("status", "failed"),
+                         "reason": res.get("reason", ""),
+                         "pending": res.get("pending", [])})
+        except Exception as ex:
+            page.update({"status": "failed", "reason": "异常: %r" % ex})
+        job_save(job)
+    job["done"] = True
+    job["finished_at"] = MOD.now_str()
+    job_save(job)
+    print("任务 %s 完成, 共 %d 页" % (job_id, len(job.get("pages") or [])))
+    return 0
+
+
 def main():
+    if len(sys.argv) >= 3 and sys.argv[1] == "--job":
+        return run_job(sys.argv[2])
     if len(sys.argv) < 2 or not "".join(sys.argv[1:]).strip():
         print('用法: python add_game.py "<链接1>" "<链接2>" ...')
         return 2

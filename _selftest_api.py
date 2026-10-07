@@ -13,6 +13,7 @@ import model as MOD
 import add_game
 
 API = "http://127.0.0.1:8790"
+TOKEN = MOD.load_or_create_token()   # FR-17~20 收紧后本地接口要 token
 checks = []
 
 
@@ -23,7 +24,8 @@ def ck(n, c):
 
 def post(path, obj):
     req = urllib.request.Request(API + path, data=json.dumps(obj).encode("utf-8"),
-                                 headers={"Content-Type": "application/json"})
+                                 headers={"Content-Type": "application/json",
+                                          "X-Hyw-Token": TOKEN})
     with urllib.request.urlopen(req, timeout=10) as r:
         return json.loads(r.read())
 

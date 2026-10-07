@@ -3,8 +3,14 @@
 让 report.html 里的星星评分 / 取消关注能实时写回 watchlist.csv。
 由 pull.py 拉取结束时自动拉起(detached), 也可手动: python server.py
 端口被占(已有实例)即退出。写表前检查 .pull.lock, 拉取进行中拒绝修改。
+
+安全(REQUIREMENTS §7 本地接口接入门槛, FR-17~20 前置):
+- CORS: 只回显白名单来源(扩展/报告页/回环), 不再 Access-Control-Allow-Origin: *
+- 认证: 除 /api/ping 外全部要求 X-Hyw-Token(报告页由 pull.py 内嵌, 扩展粘贴一次)
+- /api/llm_config 含 api_key, 同样必须带 token 才返回
 """
 import csv
+import hmac
 import json
 import os
 import re
@@ -24,6 +30,7 @@ EVENTS_PATH = os.path.join(BASE, "events.csv")
 LOCK_PATH = os.path.join(BASE, ".pull.lock")
 LLM_PATH = os.path.join(BASE, "llm.json")          # 模型 API 配置(含 key, 不进 Git)
 ADD_LOG = os.path.join(BASE, "add_log.txt")         # 批量添加的后台日志
+JOBS_DIR = os.path.join(BASE, "jobs")               # 导入任务逐页结果(FR-19)
 PORT = 8790
 _CTX = ssl.create_default_context()
 _CTX.check_hostname = False
@@ -32,10 +39,34 @@ _CTX.verify_mode = ssl.CERT_NONE
 sys.path.insert(0, BASE)
 import model as MOD
 
+TOKEN = MOD.load_or_create_token()
+
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 except Exception:
     pass
+
+
+def origin_allowed(origin):
+    """CORS 白名单: 扩展(chrome/moz-extension)、报告页(file:// -> Origin: null)、回环。
+    不在名单 -> 不回显 ACAO, 浏览器侧直接拦截。"""
+    if not origin:
+        return True   # 同源/直连(curl, 本地脚本)不走 CORS
+    o = origin.strip().lower()
+    if o in ("null", "file://"):
+        return True
+    if o.startswith("chrome-extension://") or o.startswith("moz-extension://"):
+        return True
+    return o in ("http://127.0.0.1:%d" % PORT, "http://localhost:%d" % PORT)
+
+
+def token_ok(handler):
+    """校验 X-Hyw-Token(头或 ?token=)。用 compare_digest 防时序。"""
+    got = handler.headers.get("X-Hyw-Token") or ""
+    if not got:
+        m = re.search(r"[?&]token=([0-9a-fA-F]+)", handler.path)
+        got = m.group(1) if m else ""
+    return bool(got) and hmac.compare_digest(got, TOKEN)
 
 
 def port_busy():
@@ -83,11 +114,73 @@ def log_event(game, kind, detail):
         w.writerow([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), game, kind, detail])
 
 
+def _precheck(url, rows):
+    """FR-18: 单 URL 预筛 — supported/exists/unsupported/duplicate, 全部本地判断。
+    exists 复用 add_game 的查重口径(平台 id 强、handle 仅纯主页)。"""
+    cls = MOD.classify_url(url)
+    out = {"url": url, "domain": cls["domain"], "status": "", "reason": ""}
+    if not cls["supported"]:
+        out["status"] = "unsupported"
+        out["reason"] = cls["reason"]
+        return out
+    steam_ids = set(re.findall(r"store\.steampowered\.com/app/(\d+)", url))
+    dl_ids = set(re.findall(r"dlsite\.com/[a-z]+/work/=/product_id/([A-Za-z]{2}\d+)", url))
+    mh = re.search(r"(?:x|twitter)\.com/([A-Za-z0-9_]{1,15})(?![\w/-])", url)
+    handle = mh.group(1) if mh else ""
+    for r in rows:
+        r_apps = {a.strip() for a in (r.get("steam_appid") or "").split(",") if a.strip()}
+        if steam_ids and r_apps.intersection(steam_ids):
+            out.update({"status": "exists",
+                        "reason": "已存在(Steam): %s" % (r.get("name") or "")})
+            return out
+        if dl_ids and (r.get("dlsite_id") or "").strip() in dl_ids:
+            out.update({"status": "exists",
+                        "reason": "已存在(DLsite): %s" % (r.get("name") or "")})
+            return out
+    if handle and not (steam_ids or dl_ids):
+        same = [r for r in rows
+                if (r.get("x_handle") or "").lower() == handle.lower()]
+        if same:
+            out.update({"status": "exists",
+                        "reason": "已关注该作者 @%s: %s" % (handle, same[0].get("name"))})
+            return out
+    out.update({"status": "supported", "reason": cls["reason"]})
+    return out
+
+
+def _job_write(job):
+    os.makedirs(JOBS_DIR, exist_ok=True)
+    p = os.path.join(JOBS_DIR, "%s.json" % job["id"])
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(job, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, p)
+
+
+def _prune_jobs(days=7):
+    """job 文件最多留 7 天, 防目录膨胀。"""
+    import time
+    try:
+        now = time.time()
+        for fn in os.listdir(JOBS_DIR):
+            if not fn.endswith(".json"):
+                continue
+            p = os.path.join(JOBS_DIR, fn)
+            if now - os.path.getmtime(p) > days * 86400:
+                os.remove(p)
+    except OSError:
+        pass
+
+
 class H(BaseHTTPRequestHandler):
     def _cors(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
+        """FR-17~20 收紧: 只回显白名单来源, 不再 '*'。"""
+        origin = self.headers.get("Origin")
+        if origin and origin_allowed(origin):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Hyw-Token")
 
     def log_message(self, *a):  # 静默访问日志
         pass
@@ -101,6 +194,14 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _need_auth(self):
+        """除 /api/ping 外全部要求 token; 401 不回显任何数据。"""
+        if token_ok(self):
+            return False
+        self._json({"error": "unauthorized",
+                    "hint": "带 X-Hyw-Token 头; token 见 server_token.txt 或报告页页脚"}, 401)
+        return True
+
     def do_OPTIONS(self):
         self.send_response(204)
         self._cors()
@@ -109,7 +210,10 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/api/ping"):
             self._json({"ok": True, "port": PORT})
-        elif self.path.startswith("/api/llm_config"):
+            return
+        if self._need_auth():
+            return
+        if self.path.startswith("/api/llm_config"):
             cfg = {}
             if os.path.exists(LLM_PATH):
                 try:
@@ -129,6 +233,17 @@ class H(BaseHTTPRequestHandler):
             except OSError:
                 tail = "(还没有批量添加日志)"
             self._json({"ok": True, "log": tail})
+        elif self.path.startswith("/api/import_status"):
+            m = re.search(r"[?&]id=([0-9a-f]{8,32})", self.path)
+            if not m:
+                self._json({"error": "id 必填"}, 400)
+                return
+            p = os.path.join(JOBS_DIR, "%s.json" % m.group(1))
+            try:
+                with open(p, encoding="utf-8") as f:
+                    self._json(json.load(f))
+            except OSError:
+                self._json({"error": "任务不存在"}, 404)
         else:
             self._json({"error": "not found"}, 404)
 
@@ -176,6 +291,87 @@ class H(BaseHTTPRequestHandler):
             data = json.loads(self.rfile.read(n) or b"{}")
         except Exception:
             self._json({"error": "bad json"}, 400)
+            return
+        if self._need_auth():
+            return
+
+        # ---- FR-18 导入预筛: 逐页给 supported/unsupported/exists/duplicate ----
+        if self.path.startswith("/api/import_preview"):
+            urls = data.get("urls")
+            if not isinstance(urls, list) or not urls:
+                self._json({"error": "urls 必须是非空数组"}, 400)
+                return
+            if len(urls) > 200:
+                self._json({"error": "一次最多 200 个"}, 400)
+                return
+            rows, _fields = read_rows()
+            seen = set()
+            results = []
+            for u in urls:
+                u = str(u or "").strip()
+                if not u:
+                    continue
+                if u in seen:
+                    results.append({"url": u, "status": "duplicate",
+                                    "reason": "本批次内重复", "domain": ""})
+                    continue
+                seen.add(u)
+                r = _precheck(u, rows)
+                results.append(r)
+            self._json({"ok": True, "results": results})
+            return
+
+        # ---- FR-19 提交导入: 建 job + 后台逐页处理, 返回 job_id 供轮询 ----
+        if self.path.startswith("/api/import"):
+            pages = data.get("pages")
+            if not isinstance(pages, list) or not pages:
+                self._json({"error": "pages 必须是非空数组 [{url,title?}]"}, 400)
+                return
+            if len(pages) > 100:
+                self._json({"error": "一次最多 100 页"}, 400)
+                return
+            if pull_locked():
+                self._json({"error": "拉取进行中, 稍后再导入"}, 409)
+                return
+            import secrets
+            job_id = secrets.token_hex(8)
+            clean = []
+            seen = set()
+            for p in pages:
+                if not isinstance(p, dict):
+                    continue
+                u = str(p.get("url") or "").strip()
+                if not u or u in seen:
+                    continue
+                seen.add(u)
+                clean.append({"url": u, "title": str(p.get("title") or "")[:200],
+                              "status": "queued", "reason": "", "pending": []})
+            if not clean:
+                self._json({"error": "没有可导入的 URL"}, 400)
+                return
+            job = {"id": job_id, "created": MOD.now_str(), "done": False,
+                   "pages": clean}
+            _job_write(job)
+            _prune_jobs()
+            try:
+                flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+                with open(ADD_LOG, "ab") as lf, open(os.devnull, "rb") as dn:
+                    subprocess.Popen([sys.executable, "-u",
+                                      os.path.join(BASE, "add_game.py"),
+                                      "--job", job_id],
+                                     cwd=BASE, stdin=dn, stdout=lf, stderr=lf,
+                                     creationflags=flags)
+                log_event("(import)", "Import", "提交导入任务 %s, %d 页"
+                          % (job_id, len(clean)))
+                # 明确区分"已受理": 真实结果必须轮询 import_status(验收14)
+                self._json({"ok": True, "job_id": job_id, "accepted": len(clean),
+                            "state": "accepted"})
+            except Exception as ex:
+                try:
+                    os.remove(os.path.join(JOBS_DIR, "%s.json" % job_id))
+                except OSError:
+                    pass
+                self._json({"error": "启动后台任务失败: %r" % ex}, 500)
             return
 
         if self.path.startswith("/api/llm_config"):

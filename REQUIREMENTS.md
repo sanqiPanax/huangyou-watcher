@@ -8,12 +8,21 @@
 > - **FR-01 ~ FR-12 已实现**（P0 作品身份/证据 + P1 事件提醒 + FR-12 Demo 监测），落在
 >   `model.py`（身份与证据层）/ `add_game.py` / `pull.py` / `server.py` / 报告页；
 >   自测：`_selftest_model.py` 88 项、`_selftest_add.py` 20 项、`_selftest_live.py` 25 项
->   （联网验平台字段）、`_selftest_render.py` 27 项回归，全部通过。
+>   （联网验平台字段）、`_selftest_render.py` 27 项回归、`_selftest_api.py` 10 项，全部通过。
+> - **FR-17 ~ FR-20 已实现**（标签页批量导入扩展 + §7 本地接口收紧）：
+>   `extension/`（MV3，无后台常驻、仅 tabs/clipboardWrite/storage、host 仅回环）；
+>   `server.py` 新增 `/api/import_preview`（FR-18 预筛）、`/api/import`（建 job）、
+>   `/api/import_status`（FR-19 逐页结果），`add_game.py --job` 逐页落盘；
+>   §7 收紧：CORS 白名单回显（废除 `*`）、除 `/api/ping` 外全要求 `X-Hyw-Token`
+>   （报告页由 `pull.py` 内嵌，扩展首次粘贴 `server_token.txt`）。
+>   自测：`_selftest_ext.py` 55 项（离线）、`_selftest_ext_api.py` 26 项（真实 HTTP
+>   认证/CORS/job 链路），全部通过。
+>   **验收样例 10、11、13、14、15 由这两套覆盖**（样例 15 对应"无 background 常驻 +
+>   只查 currentWindow+highlighted"的静态断言；真机扩展加载待用户在浏览器里装一次）。
 > - **FR-13 ~ FR-16（P2 自定义来源）未实现。**
-> - **FR-17 ~ FR-20（标签页批量导入扩展）未实现**；§7 中与之相关的“本地接口收紧
->   （CORS/认证）”“每页结果反馈”也未实现——扩展接入前必须一并做。
 > - 第 10 节的待用户决定问题仍未拍板。
-> - 验收样例 1-7、9 已由自测覆盖；样例 4（跨来源合并）待真实 Demo 上线观测验证。
+> - 验收样例 1-7、9 已由自测覆盖；样例 4（跨来源合并）依赖真实 Demo 上线观测验证；
+>   样例 12 由 FR-04 查重规则覆盖（`_selftest_add.py`）。
 
 ## 1. 产品定位
 

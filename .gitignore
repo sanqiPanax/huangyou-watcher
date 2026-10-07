@@ -17,6 +17,8 @@ _x_err.txt
 graph.json
 graph.json.corrupt-*
 graph.json.tmp
+server_token.txt
+jobs/
 
 # ---- 自测产物 ----
 _selftest_out/

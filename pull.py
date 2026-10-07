@@ -557,6 +557,7 @@ READ_JS = """
 
   /* ---- 本地服务 API(星星/取消关注), 服务未启动时给出提示 ---- */
   var API='http://127.0.0.1:8790';
+  var HYW_TOKEN='__TOKEN__';   // 本地接口认证(构建时嵌入, FR-17~20 收紧后必带)
   var svcOk=null; // null=未探测
   function svcHint(msg){
     var h=document.getElementById('svc-hint');
@@ -565,8 +566,17 @@ READ_JS = """
     else{h.style.display='none';}
   }
   function post(path, data){
-    return fetch(API+path,{method:'POST',headers:{'Content-Type':'application/json'},
+    return fetch(API+path,{method:'POST',headers:{'Content-Type':'application/json',
+      'X-Hyw-Token':HYW_TOKEN},
       body:JSON.stringify(data)}).then(function(r){
+      if(r.status===0) throw new Error('down');
+      return r.json().then(function(j){
+        if(!r.ok){var e=new Error(j.error||('HTTP '+r.status));e.status=r.status;throw e;}
+        return j;});
+    });
+  }
+  function getAuth(path){
+    return fetch(API+path,{headers:{'X-Hyw-Token':HYW_TOKEN}}).then(function(r){
       if(r.status===0) throw new Error('down');
       return r.json().then(function(j){
         if(!r.ok){var e=new Error(j.error||('HTTP '+r.status));e.status=r.status;throw e;}
@@ -734,7 +744,7 @@ READ_JS = """
   if(addLogBtn) addLogBtn.addEventListener('click',function(){
     var box=document.getElementById('add-log');
     if(!box) return;
-    fetch(API+'/api/add_log').then(function(r){return r.json();}).then(function(j){
+    getAuth('/api/add_log').then(function(j){
       box.style.display='block';
       box.textContent=j.log||'(空)';
       box.scrollTop=box.scrollHeight;
@@ -743,7 +753,7 @@ READ_JS = """
 
   // 模型 API 配置
   function loadLlm(){
-    fetch(API+'/api/llm_config').then(function(r){return r.json();}).then(function(j){
+    getAuth('/api/llm_config').then(function(j){
       var c=j.config||{};
       var u=document.getElementById('llm-url'),k=document.getElementById('llm-key'),
           m=document.getElementById('llm-model'),h=document.getElementById('llm-hdr');
@@ -1353,7 +1363,8 @@ def build_report(rows, changes_map, errors, run_meta, updates, keep, g=None):
     parts.append("<footer>数据源: X(twitter-cli 公开时间线, <b>不关注/不点赞/不互动</b>) · Steam Web API · DLsite 作品页<br>"
                  "文件: watchlist.csv(关注表,手改加行) · updates.json(每游戏最近 %d 条更新) · config.json(keep_updates) · "
                  "events.csv(审计日志) · report.html(本报告)</footer>" % keep)
-    parts.append("<script>%s</script>" % READ_JS)
+    parts.append("<script>%s</script>" % READ_JS.replace(
+        "__TOKEN__", MOD.load_or_create_token()))
     parts.append("</div></body></html>")
     with open(REPORT_PATH, "w", encoding="utf-8") as f:
         f.write("".join(parts))
