@@ -7,6 +7,7 @@
 import csv
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -27,6 +28,9 @@ PORT = 8790
 _CTX = ssl.create_default_context()
 _CTX.check_hostname = False
 _CTX.verify_mode = ssl.CERT_NONE
+
+sys.path.insert(0, BASE)
+import model as MOD
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -308,6 +312,105 @@ class H(BaseHTTPRequestHandler):
             write_rows(rows, fields)
             log_event(game, "Unfollow", "取消关注(已存 unfollowed.csv)")
             self._json({"ok": True})
+            return
+
+        # ---- FR-03 候选确认/拒绝(写 graph.json; 确认到已有作品时把平台页挂上去) ----
+        if self.path.startswith("/api/candidate"):
+            cid = str(data.get("id") or "")
+            action = str(data.get("action") or "")
+            target = str(data.get("target") or "")
+            if not cid or action not in ("confirm", "reject"):
+                self._json({"error": "id/action 必填, action=confirm|reject"}, 400)
+                return
+            if pull_locked():
+                self._json({"error": "拉取进行中, 稍后再操作"}, 409)
+                return
+            g = MOD.load_graph()
+            cand, msg = MOD.resolve_candidate(g, cid, action, target)
+            if cand is None:
+                self._json({"error": msg}, 404)
+                return
+            appended = ""
+            if action == "confirm" and target and target != "(新作品)":
+                rows, fields = read_rows()
+                hit = next((r for r in rows if (r.get("name") or "") == target), None)
+                if hit is None:
+                    MOD.resolve_candidate(g, cid, "reject")  # 回滚状态
+                    MOD.save_graph(g)
+                    self._json({"error": "目标作品不存在: %s" % target}, 404)
+                    return
+                url = cand.get("url") or ""
+                m_st = re.search(r"store\.steampowered\.com/app/(\d+)", url)
+                m_dl = re.search(r"dlsite\.com/[a-z]+/work/=/product_id/([A-Za-z]{2}\d+)", url)
+                if m_st:
+                    apps = [a for a in (hit.get("steam_appid") or "").split(",") if a.strip()]
+                    if m_st.group(1) not in apps:
+                        apps.append(m_st.group(1))
+                    hit["steam_appid"] = ",".join(apps)
+                    appended = "Steam %s" % m_st.group(1)
+                elif m_dl:
+                    hit["dlsite_id"] = m_dl.group(1)
+                    appended = "DLsite %s" % m_dl.group(1)
+                if appended:
+                    write_rows(rows, fields)
+                    MOD.record_fact(g, target, "page", appended, "confirm", url=url)
+                    log_event(target, "Candidate", "确认候选 %s -> %s" % (url, target))
+            elif action == "confirm" and target == "(新作品)":
+                # 交给后台 add_game 正常入库(拿封面/分类), 候选先标已确认
+                log_event(cand.get("title") or "(候选)", "Candidate",
+                          "确认为新作品, 后台添加 %s" % cand.get("url"))
+                url = cand.get("url") or ""
+                if url:
+                    try:
+                        flags = 0x00000008 | 0x00000200  # DETACHED_PROCESS|NEW_PROCESS_GROUP
+                        with open(ADD_LOG, "ab") as lf, open(os.devnull, "rb") as dn:
+                            subprocess.Popen([sys.executable, "-u",
+                                              os.path.join(BASE, "add_game.py"), url],
+                                             cwd=BASE, stdin=dn, stdout=lf, stderr=lf,
+                                             creationflags=flags)
+                    except Exception as ex:
+                        print("[server] 后台添加启动失败: %r" % ex)
+            MOD.save_graph(g)
+            self._json({"ok": True, "msg": msg, "appended": appended})
+            return
+
+        # ---- FR-11 提醒设置(全局事件类型/来源开关) ----
+        if self.path.startswith("/api/alerts"):
+            items = data.get("items")
+            if not isinstance(items, list) or not items:
+                self._json({"error": "items 必须是非空数组 [{key,value}]"}, 400)
+                return
+            g = MOD.load_graph()
+            okn, bad = 0, []
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                good, msg = MOD.set_alert(g, "", str(it.get("key") or ""),
+                                          bool(it.get("value")), scope="global")
+                if good:
+                    okn += 1
+                else:
+                    bad.append(msg)
+            MOD.save_graph(g)
+            log_event("(alerts)", "Config", "提醒设置更新 %d 项 %s" % (okn, bad or ""))
+            self._json({"ok": True, "saved": okn, "bad": bad})
+            return
+
+        # ---- FR-11 单作品静音/恢复 ----
+        if self.path.startswith("/api/mute"):
+            game = str(data.get("game") or "")
+            if not game:
+                self._json({"error": "game 必填"}, 400)
+                return
+            mute = bool(data.get("mute"))
+            g = MOD.load_graph()
+            good, msg = MOD.set_alert(g, game, "mute", not mute, scope="row")
+            if not good:
+                self._json({"error": msg}, 400)
+                return
+            MOD.save_graph(g)
+            log_event(game, "Alert", "静音" if mute else "恢复提醒")
+            self._json({"ok": True, "muted": mute})
             return
 
         if self.path.startswith("/api/category"):

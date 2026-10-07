@@ -30,6 +30,7 @@ FIELDS = ["name", "x_handle", "steam_appid", "dlsite_id", "expected_release",
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import media as M
+import model as MOD
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -181,18 +182,61 @@ def fetch_x_posts(handle, n=20):
              "time": t.get("time") or ""} for t in data]
 
 
-def fetch_steam(appid):
-    """返回 {'name':..,'date':'Dec 1, 2026'|'Coming soon','coming':bool}"""
-    url = "https://store.steampowered.com/api/appdetails?appids=%s&l=english" % appid
-    d = json.loads(http_get(url, tries=3))
+def fetch_steam(appid, cc="cn"):
+    """Steam appdetails -> 名称/发售/价格/类型/Demo/语言 一次拿全(FR-05/07/08/12)。
+    返回 {'name','date','coming','price':{...}|None,'genres':[..],'demos':[appid..],
+          'languages':[..],'is_free':bool}
+    价格需带 cc 才返回(price_overview); 未发售/免费返回 None。"""
+    url = "https://store.steampowered.com/api/appdetails?appids=%s&l=english&cc=%s" % (appid, cc)
+    d = json.loads(http_get(url, tries=3, auto_proxy=True))
     node = d.get(appid, {})
     if not node.get("success"):
         raise RuntimeError("Steam appid %s 查询失败" % appid)
     data = node["data"]
     rd = data.get("release_date") or {}
-    return {"name": data.get("name") or "",
-            "date": rd.get("date") or "",
-            "coming": bool(rd.get("coming_soon"))}
+    price = data.get("price_overview")
+    sl = data.get("supported_languages")
+    if isinstance(sl, dict):
+        langs = list(sl.keys())
+    elif isinstance(sl, list):
+        langs = [str(x) for x in sl]
+    elif isinstance(sl, str):
+        langs = [sl]
+    else:
+        langs = []
+    out = {"name": data.get("name") or "",
+           "date": rd.get("date") or "",
+           "coming": bool(rd.get("coming_soon")),
+           "is_free": bool(data.get("is_free")),
+           "genres": [g.get("description") for g in (data.get("genres") or [])
+                      if g.get("description")],
+           "demos": [str(x.get("appid")) for x in (data.get("demos") or [])
+                     if isinstance(x, dict) and x.get("appid")],
+           "languages": langs,
+           "price": None}
+    if price:
+        out["price"] = {"currency": price.get("currency") or "",
+                        "initial": price.get("initial"),
+                        "final": price.get("final"),
+                        "discount": price.get("discount_percent") or 0,
+                        "formatted": price.get("final_formatted") or "",
+                        "region": (cc or "").upper()}
+    return out
+
+
+def price_text(p):
+    """FR-07: 价格显示为 '原价/现价 + 货币 + 地区'; 缺价格不算免费。"""
+    if not p:
+        return ""
+    cur = p.get("currency") or ""
+    reg = p.get("region") or ""
+    cury = "%s·%s" % (cur, reg) if cur and reg else (cur or reg)
+    fin = p.get("formatted") or ""
+    if p.get("discount") and p.get("initial") and p["initial"] != p.get("final"):
+        # 原价以货币最小单位计, 只展示数值区间避免货币换算歧义
+        return "%s (原价 %s %s, -%d%%) [%s]" % (fin or p.get("final"),
+                                                p["initial"], cur, p["discount"], cury)
+    return "%s [%s]" % (fin or (p.get("final") if p.get("final") is not None else ""), cury)
 
 
 def parse_steam_date(s):
@@ -216,8 +260,11 @@ def date_key(s):
 
 
 def fetch_dlsite(dlsite_id):
-    """DLsite 作品页 -> {'date':'YYYY-MM-DD'|None,'title':..,'url':..}
-    dlsite_id 支持 RJ/RG 编号或完整 URL; 编号自动遍历分区。"""
+    """DLsite 作品页 -> 发售日/标题/价格/分类/体験版/语言 一次解析(FR-05/07/08/12)。
+    返回 {'date','title','url','price':{...}|None,'genres':[..],
+          'trial':bool,'trial_url':str,'languages':[..]}
+    价格取页面 var contents 里的 price/official_price(円, 地区=JP); 体験版看
+    trial_download 区块(独立试玩文件, 有则 trial=True)。"""
     urls = []
     if dlsite_id.startswith("http"):
         urls = [dlsite_id]
@@ -241,7 +288,43 @@ def fetch_dlsite(dlsite_id):
         mt = re.search(r"<title>([^<]+)</title>", page)
         title = mt.group(1).strip() if mt else ""
         title = re.split(r"\s*[|｜]\s*DLsite", title)[0].strip()
-        return {"date": date, "title": title, "url": u}
+        # 价格: var contents 里 price(现价)/official_price(定价), 单位円
+        price = None
+        mp = re.search(r'"price"\s*:\s*([0-9.]+)', page)
+        mo = re.search(r'"official_price"\s*:\s*([0-9.]+)', page)
+        if mp:
+            price = {"currency": "JPY", "region": "JP",
+                     "final": int(float(mp.group(1))),
+                     "initial": int(float(mo.group(1))) if mo else None,
+                     "discount": 0, "formatted": "%s 円" % mp.group(1)}
+            if price["initial"] and price["initial"] > price["final"]:
+                price["discount"] = round(
+                    (1 - price["final"] / float(price["initial"])) * 100)
+        # 分类: genre 链接(work.genre 来源) 与 作品形式 图标
+        genres = []
+        for gm in re.finditer(r'href="[^"]*fsr/=/genre/\d+/from/work\.genre[^"]*"[^>]*>'
+                              r'([^<]{1,30})<', page):
+            genres.append(gm.group(1).strip())
+        for gm in re.finditer(r'href="[^"]*works/type/=/work_type/([A-Z0-9]+)/from/icon\.work"'
+                              r'[^>]*>\s*<span[^>]*title="([^"]{1,30})"', page):
+            genres.append(gm.group(2).strip())
+        # 体験版(FR-12): trial_download 区块 + 下载直链
+        trial, trial_url = False, ""
+        mt2 = re.search(r'<div class="trial_download[^"]*".{0,600}?'
+                        r'href="(//trial\.dlsite\.com/[^"]+)"', page, re.S)
+        if mt2:
+            trial, trial_url = True, "https:" + mt2.group(1)
+        # 语言(FR-08 汉化/语言支持事件用)
+        languages = []
+        ml = re.search(r"data-supported-languages='(\[[^\]]*\])'", page)
+        if ml:
+            try:
+                languages = json.loads(ml.group(1))
+            except Exception:
+                languages = []
+        return {"date": date, "title": title, "url": u, "price": price,
+                "genres": genres, "trial": trial, "trial_url": trial_url,
+                "languages": languages}
     raise RuntimeError("DLsite %s 拉取失败: %r" % (dlsite_id, last_err))
 
 
@@ -376,6 +459,54 @@ th{color:#7a8398;font-weight:600;}
 .catb.c-other{background:#252b38;color:#9aa4b8;}
 .freq{font-size:11.5px;color:#8b94a7;}
 footer{color:#5b6474;font-size:12px;margin-top:30px;line-height:1.7;}
+/* ---- REQUIREMENTS P0/P1: 证据 / 事件 / 候选 / 提醒 ---- */
+.evhead{margin:14px 0 4px;font-size:12px;color:#7a8398;display:flex;gap:10px;align-items:center;flex-wrap:wrap;}
+.factbox{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px;}
+.fact{background:#171c26;border:1px solid #2a3142;border-radius:8px;padding:7px 11px;font-size:12.5px;color:#a9b2c3;max-width:100%;}
+.fact b{color:#e7ecf5;font-weight:600;}
+.fact .fsrc{display:block;font-size:11px;color:#5b6474;margin-top:3px;}
+.fact .fsrc a{color:#6ab7ff;text-decoration:none;}
+.fact.st-failed{border-color:#6e2b32;background:#26151a;}
+.fact.st-failed b{color:#ff9aa4;}
+.fact.st-delayed{border-color:#6e5a2b;background:#261f14;}
+.fact.st-delayed b{color:#f5c451;}
+.fact.st-confirmed b,.fact.st-released b{color:#6fe0a0;}
+.tagrow{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;}
+.ptag{font-size:11.5px;border-radius:4px;padding:2px 8px;background:#243044;color:#7fa8e0;}
+.ptag.ai{background:#33204a;color:#c69af0;}
+.ptag.demo{background:#1d4d33;color:#6fe0a0;}
+.ptag.demo.none{background:#252b38;color:#7a8398;}
+.evlist{margin-top:6px;}
+.evrow{border-left:3px solid #2a3142;background:#171b24;border-radius:0 8px 8px 0;padding:7px 11px;margin:5px 0;font-size:13px;color:#a9b2c3;}
+.evrow .evt{font-size:11.5px;color:#8b94a7;margin-right:8px;}
+.evrow .evk{display:inline-block;font-size:11px;border-radius:4px;padding:1px 7px;background:#1d3a2a;color:#6fe0a0;margin-right:8px;}
+.evrow .evk.k-delay,.evrow .evk.k-price{background:#44360f;color:#f5c451;}
+.evrow .evk.k-x_post,.evrow .evk.k-other{background:#252b38;color:#9aa4b8;}
+.evrow .evsrc{font-size:11.5px;color:#5b6474;}
+.evrow .evsrc a{color:#6ab7ff;text-decoration:none;}
+.evrow .evmore{font-size:11.5px;color:#7a8398;cursor:pointer;}
+.evmore:hover{color:#6ab7ff;}
+.evdetail{display:none;font-size:11.5px;color:#7a8398;margin-top:5px;border-top:1px dashed #2a3142;padding-top:5px;}
+.evdetail.show{display:block;}
+.panel h4{margin:14px 0 6px;font-size:13.5px;color:#c6cede;}
+.cand{background:#12151c;border:1px solid #2a3142;border-radius:10px;padding:12px 14px;margin:8px 0;}
+.cand .ctitle{font-size:14px;color:#e7ecf5;font-weight:600;}
+.cand .cmeta{font-size:12px;color:#8b94a7;margin-top:4px;word-break:break-all;}
+.cand .cmeta a{color:#6ab7ff;text-decoration:none;}
+.cand .cev{font-size:12px;color:#9aa4b8;margin-top:5px;}
+.cand .crow{display:flex;gap:8px;margin-top:9px;align-items:center;flex-wrap:wrap;}
+.cand select{background:#1b202b;color:#dbe2ef;border:1px solid #364052;border-radius:6px;padding:6px 8px;font-size:12.5px;max-width:280px;}
+.conf{font-size:11px;border-radius:4px;padding:1px 7px;background:#243044;color:#7fa8e0;}
+.conf.low{background:#44360f;color:#f5c451;}
+.alertrow{display:flex;gap:8px;align-items:center;padding:5px 0;font-size:13px;color:#a9b2c3;flex-wrap:wrap;}
+.alertrow input{accent-color:#3fae6a;width:15px;height:15px;}
+.alertrow .scope{font-size:11.5px;color:#5b6474;}
+.otherworks{font-size:12px;color:#8b94a7;margin-top:7px;}
+.otherworks a{color:#6ab7ff;text-decoration:none;margin-right:8px;}
+.pendingbtn{background:#2c3a56;border:1px solid #4a6a9a;color:#cfe0ff;font-size:12px;border-radius:6px;padding:4px 12px;cursor:pointer;margin-left:8px;}
+.pendingbtn .pcnt{background:#f5c451;color:#12151c;border-radius:9px;padding:0 6px;font-weight:700;margin-left:4px;}
+.inputerr{background:#26151a;border:1px solid #6e2b32;border-radius:8px;padding:9px 12px;font-size:12.5px;color:#ff9aa4;margin:6px 0;word-break:break-all;}
+.inputerr .why{color:#c98b93;font-size:11.5px;}
 """
 
 READ_JS = """
@@ -575,6 +706,8 @@ READ_JS = """
   }
   togglePanel('tg-add','p-add');
   togglePanel('tg-llm','p-llm');
+  togglePanel('tg-cand','p-cand');
+  togglePanel('tg-alert','p-alert');
   function setMsg(id,txt,cls){
     var el=document.getElementById(id);
     if(!el) return;
@@ -667,6 +800,117 @@ READ_JS = """
     if(document.getElementById('p-llm').classList.contains('show')) loadLlm();
   });
 
+  /* ---- FR-03 候选确认/拒绝 ---- */
+  document.querySelectorAll('.cand-ok').forEach(function(b){
+    b.addEventListener('click',function(){
+      var box=b.closest('.cand'); var cid=box.getAttribute('data-cid');
+      var sel=box.querySelector('.cand-target');
+      var msg=box.querySelector('.cand-msg');
+      b.disabled=true; if(msg){msg.textContent='提交中...';msg.className='msg cand-msg';}
+      post('/api/candidate',{id:cid,action:'confirm',target:sel?sel.value:''})
+        .then(function(){
+          if(msg){msg.textContent='已确认';msg.className='msg cand-msg ok';}
+          box.style.transition='opacity .3s';box.style.opacity='0';
+          setTimeout(function(){box.remove();bumpCandCnt(-1);},300);
+        }).catch(function(e2){
+          b.disabled=false;
+          if(msg){
+            msg.textContent = e2.message==='down'
+              ? '本地服务未启动: 双击 拉取.cmd 带起后再试' : '失败: '+e2.message;
+            msg.className='msg cand-msg err';
+          }
+        });
+    });
+  });
+  document.querySelectorAll('.cand-no').forEach(function(b){
+    b.addEventListener('click',function(){
+      var box=b.closest('.cand'); var cid=box.getAttribute('data-cid');
+      if(!window.confirm('拒绝该候选? (之后不再提示这条链接)')) return;
+      var msg=box.querySelector('.cand-msg');
+      post('/api/candidate',{id:cid,action:'reject'})
+        .then(function(){
+          if(msg){msg.textContent='已拒绝';msg.className='msg cand-msg ok';}
+          box.style.transition='opacity .3s';box.style.opacity='0';
+          setTimeout(function(){box.remove();bumpCandCnt(-1);},300);
+        }).catch(function(e2){
+          if(msg){
+            msg.textContent = e2.message==='down'?'本地服务未启动':'失败: '+e2.message;
+            msg.className='msg cand-msg err';
+          }
+        });
+    });
+  });
+  function bumpCandCnt(d){
+    var el=document.getElementById('cand-cnt'); if(!el) return;
+    var n=Math.max(0,(parseInt(el.textContent||'0',10)||0)+d);
+    el.textContent=n;
+    var btn=document.getElementById('tg-cand'); if(btn) btn.style.display=n?'':'none';
+  }
+
+  /* ---- FR-11 提醒设置保存 ---- */
+  var alSave=document.getElementById('al-save');
+  if(alSave) alSave.addEventListener('click',function(){
+    var picks=[];
+    document.querySelectorAll('#p-alert .al-chk').forEach(function(c){
+      picks.push({key:c.getAttribute('data-key'),value:c.checked});
+    });
+    var msg=document.getElementById('al-msg');
+    alSave.disabled=true; if(msg){msg.textContent='保存中...';msg.className='msg';}
+    post('/api/alerts',{items:picks}).then(function(){
+      alSave.disabled=false;
+      if(msg){msg.textContent='已保存('+picks.length+' 项)';msg.className='msg ok';}
+    }).catch(function(e2){
+      alSave.disabled=false;
+      if(msg){
+        msg.textContent = e2.message==='down'
+          ? '本地服务未启动: 双击 拉取.cmd 带起后再试' : '失败: '+e2.message;
+        msg.className='msg err';
+      }
+    });
+  });
+
+  /* ---- FR-11 单作品静音 ---- */
+  document.querySelectorAll('.mutebtn').forEach(function(b){
+    b.addEventListener('click',function(ev){
+      ev.stopPropagation();
+      var muted=b.textContent.indexOf('已静音')>=0;
+      post('/api/mute',{game:b.getAttribute('data-game'),mute:!muted})
+        .then(function(){
+          b.textContent = !muted ? '🔕 已静音' : '🔔 提醒';
+        }).catch(function(e2){
+          alert(e2.message==='down'
+            ? '本地服务未启动: 双击 拉取.cmd 带起后再试' : '失败: '+e2.message);
+        });
+    });
+  });
+
+  /* ---- 事件证据展开 ---- */
+  document.querySelectorAll('.evmore').forEach(function(sp){
+    sp.addEventListener('click',function(ev){
+      ev.stopPropagation();
+      var d=document.getElementById(sp.getAttribute('data-evd'));
+      if(d) d.classList.toggle('show');
+    });
+  });
+
+  /* ---- FR-08 同作者其它作品跳转 ---- */
+  document.querySelectorAll('[data-jump]').forEach(function(a){
+    a.addEventListener('click',function(ev){
+      ev.preventDefault();
+      var target=a.getAttribute('data-jump');
+      var cards=document.querySelectorAll('#cards .card');
+      for(var i=0;i<cards.length;i++){
+        var nm=cards[i].querySelector('.gname');
+        if(nm && nm.textContent===target){
+          cards[i].scrollIntoView({behavior:'smooth',block:'center'});
+          cards[i].style.outline='2px solid #4a6a9a';
+          setTimeout(function(c){return function(){c.style.outline='';};}(cards[i]),1600);
+          break;
+        }
+      }
+    });
+  });
+
   refresh();
 })();
 """
@@ -683,11 +927,84 @@ def linkify(s):
                   lambda m: "<a href='%s'>%s</a>" % (m.group(1), m.group(1)), s)
 
 
-def build_report(rows, changes_map, errors, run_meta, updates, keep):
+def _facts_html(g, gname, e):
+    """FR-05/06/07/08/12: 把一个作品的最新事实渲染成证据块。
+    每块显示 值 + 来源 + 抓取时间; 抓取失败/延期单独配色(§4 状态有时间)。"""
+    facts = (g.get("facts", {}).get(gname) or {})
+    if not facts:
+        return ""
+    order = [("release_status", "发售状态"), ("release_date", "发售日"),
+             ("price", "价格"), ("demo", "Demo"), ("genres", "类型"),
+             ("language", "语言")]
+    blocks, tags = [], []
+    for field, label in order:
+        lst = facts.get(field) or []
+        if not lst:
+            continue
+        # 最新一条; 同字段多来源(Steam/DLsite)各展示一条最新(FR-07 不跨地区比较)
+        latest_by_src = {}
+        for it in reversed(lst):
+            s = it.get("src") or "?"
+            if s not in latest_by_src:
+                latest_by_src[s] = it
+        if field == "genres":
+            # 类型用标签展示(FR-08 平台原始标签 + AI 归类分开)
+            for s, it in latest_by_src.items():
+                for tag in [t.strip() for t in (it.get("v") or "").split(",") if t.strip()]:
+                    tags.append("<span class='ptag' title='%s · %s'>%s</span>"
+                                % (e(s), e(it.get("at") or ""), e(tag)))
+            continue
+        for s, it in list(latest_by_src.items()):
+            v = it.get("v") or ""
+            if v in ("", "unknown", "none") and field != "release_status":
+                continue
+            st = it.get("status") or ""
+            cls = ""
+            if st == "failed":
+                cls = " st-failed"
+            elif st in ("delayed", "author_post", "store_tbc"):
+                cls = " st-delayed"
+            elif st in ("confirmed", "released"):
+                cls = " st-confirmed"
+            if field == "release_status":
+                v = MOD.RELEASE_LABEL.get(v, v)
+            if field == "demo":
+                v = MOD.DEMO_LABEL.get(v, v)
+                if v == "无Demo":
+                    continue  # 默认不显示"无", 避免噪声(有 Demo 才显示)
+            url = it.get("url") or ""
+            src_html = ("%s · 抓取 %s" % (e(s), e(it.get("at") or "")))
+            if url:
+                src_html = "<a href='%s' target='_blank' rel='noopener'>%s</a>" % (
+                    e(url), src_html)
+            if it.get("note") and field in ("release_status", "demo"):
+                src_html += " · %s" % e(it["note"][:60])
+            if st == "failed":
+                v = "抓取失败"
+            blocks.append("<div class='fact%s'><b>%s</b> %s<span class='fsrc'>%s</span></div>"
+                          % (cls, e(label), e(v or "—"), src_html))
+    ai = ""
+    # AI 归类单独标注(FR-08: 平台原始标签与 AI 归类分开)
+    parts = []
+    if tags:
+        parts.append("<div class='evhead'>类型(平台原始标签)</div>"
+                     "<div class='tagrow'>%s</div>" % "".join(tags))
+    if blocks:
+        parts.append("<div class='evhead'>作品档案(每项可点来源核对)</div>"
+                     "<div class='factbox'>%s</div>" % "".join(blocks))
+    if not parts:
+        return ""
+    return "".join(parts)
+
+
+def build_report(rows, changes_map, errors, run_meta, updates, keep, g=None):
     """生成 report.html。
     changes_map: id(row) -> [(src, text)] 本轮变化
     updates: {game: [{t,src,text}]} 每游戏最近 keep 条更新历史
+    g: graph.json 证据库(事实/事件/候选/提醒), 用于证据与待确认面板
     已读状态存浏览器 localStorage(按 uid), 不受报告重新生成影响。"""
+    if g is None:
+        g = MOD.load_graph()
     e = html.escape
     updated = sum(1 for r in rows if changes_map.get(id(r)))
     total_updates = sum(int(r.get("update_count") or 0) for r in rows)
@@ -744,13 +1061,84 @@ def build_report(rows, changes_map, errors, run_meta, updates, keep):
         "连不上时自动回退 DeepSeek。测试连接会发一条 2 字短消息验证。</div>"
         "</div>")
 
+    # ---- FR-03 待确认候选面板 ----
+    pend = MOD.pending_candidates(g)
     parts.append("<div class='sortbar'>"
                  "<span style='font-size:12.5px;color:#8b94a7'>排序:</span>"
                  "<button class='btn sortbtn' data-sort='default'>默认顺序</button>"
                  "<button class='btn sortbtn' data-sort='stars'>关注度 ★</button>"
                  "<button class='btn sortbtn' data-sort='freq'>更新频率</button>"
+                 "<button class='toolbtn' id='tg-cand'%s>⚑ 待确认<span class='pcnt' id='cand-cnt'>%d</span></button>"
+                 "<button class='toolbtn' id='tg-alert'>🔔 提醒设置</button>"
                  "<span id='svc-hint' class='svc-off' style='display:none'></span>"
-                 "</div>")
+                 "</div>" % (" style='display:none'" if not pend else "",
+                             len(pend)))
+
+    # ---- FR-03 待确认候选面板 ----
+    cand_parts = ["<div class='panel' id='p-cand'><h3>待确认候选(FR-03)</h3>"]
+    if not pend:
+        cand_parts.append("<div class='hint'>暂无待确认候选。添加链接时若匹配不确定,"
+                          "会先进这里, 不会自动写进关注表。</div>")
+    for c in pend:
+        conf = float(c.get("confidence") or 0)
+        cand_parts.append(
+            "<div class='cand' data-cid='%s'>"
+            "<div class='ctitle'>%s <span class='conf%s'>置信 %.0f%%</span></div>"
+            "<div class='cmeta'><a href='%s' target='_blank' rel='noopener'>%s</a></div>"
+            "<div class='cev'>%s</div>"
+            "<div class='crow'>挂到作品: <select class='cand-target'>"
+            "<option value='(新作品)'>＋ 作为新作品入库</option>%s</select>"
+            "<button class='btn cand-ok'>确认</button>"
+            "<button class='btn cand-no'>拒绝</button>"
+            "<span class='msg cand-msg'></span></div>"
+            "</div>" % (
+                e(c.get("id")), e(c.get("title") or c.get("platform") or "候选"),
+                " low" if conf < 0.6 else "", conf * 100,
+                e(c.get("url")), e(c.get("url")),
+                e("%s · %s" % (c.get("reason") or "", "证据: " + "; ".join(
+                    "%s%s" % (x.get("from", ""), "(转发)" if x.get("retweet") else "")
+                    for x in (c.get("evidence") or []))
+                    if c.get("evidence") else "")),
+                "".join("<option value='%s'>%s</option>" % (e(r2.get("name") or ""),
+                                                            e(r2.get("name") or ""))
+                        for r2 in rows)))
+    cand_parts.append("</div>")
+
+    # ---- FR-11 提醒设置面板 ----
+    ap = MOD.alert_prefs(g)
+    alert_parts = ["<div class='panel' id='p-alert'><h3>提醒设置(FR-11)</h3>",
+                   "<div class='hint'>勾选的事件类型才弹 Windows 通知; 不勾的只进报告。"
+                   "普通 X 帖默认不提醒(低噪声)。来源开关单独控制。</div>",
+                   "<h4>事件类型(全局)</h4>"]
+    for k in ("demo", "release", "delay", "listing", "price", "version", "lang",
+              "x_post", "other"):
+        alert_parts.append(
+            "<label class='alertrow'><input type='checkbox' class='al-chk' data-key='%s' "
+            "data-scope='global' %s> %s<span class='scope'>%s</span></label>"
+            % (k, "checked" if ap.get(k) else "", e(MOD.EVENT_LABEL.get(k, k)),
+               " · 默认关" if k in ("x_post", "other") else ""))
+    alert_parts.append("<h4>来源(全局)</h4>")
+    for k, lab in (("src_x", "X 帖"), ("src_steam", "Steam"), ("src_dlsite", "DLsite")):
+        alert_parts.append(
+            "<label class='alertrow'><input type='checkbox' class='al-chk' data-key='%s' "
+            "data-scope='global' %s> %s</label>" % (k, "checked" if ap.get(k) else "", lab))
+    alert_parts.append("<div class='row'><button class='btn' id='al-save'>保存提醒设置</button>"
+                       "<span class='msg' id='al-msg'></span></div>")
+    alert_parts.append("<h4>单个作品静音</h4><div class='hint'>卡片右上角 🔔 按钮 = "
+                       "静音/恢复该作品的全部提醒(按作品单独控制)。</div></div>")
+
+    # ---- FR-01 未识别输入 ----
+    inputerr_parts = []
+    if g.get("input_errors"):
+        inputerr_parts.append("<h2>未识别的输入(FR-01, 保留原链接与原因)</h2>")
+        for it in g["input_errors"][-30:]:
+            inputerr_parts.append(
+                "<div class='inputerr'>%s<div class='why'>%s · %s</div></div>"
+                % (e(it.get("input", "")), e(it.get("reason", "")), e(it.get("at", ""))))
+
+    # 三个面板在 sortbar 之后、统计区之前插入
+    parts.append("".join(cand_parts))
+    parts.append("".join(alert_parts))
 
     # 更新频率 = 最近 30 天事件数(events.csv 统计, 无事件=0)
     freq30 = {}
@@ -764,8 +1152,8 @@ def build_report(rows, changes_map, errors, run_meta, updates, keep):
                     except ValueError:
                         continue
                     if ets >= cutoff:
-                        g = ev.get("game", "")
-                        freq30[g] = freq30.get(g, 0) + 1
+                        gm = ev.get("game", "")
+                        freq30[gm] = freq30.get(gm, 0) + 1
 
     parts.append("<div class='stat'>"
                  "<div class='chip'><b>%d</b><span>关注游戏</span></div>"
@@ -779,6 +1167,8 @@ def build_report(rows, changes_map, errors, run_meta, updates, keep):
         for err in errors:
             parts.append("<li>%s</li>" % e(err))
         parts.append("</ul></details></div>")
+
+    parts.append("".join(inputerr_parts))
 
     # ---- 分类筛选栏(动态统计) ----
     cat_order = ["游戏", "插画", "3D", "卖肉", "视频", "其他"]
@@ -836,6 +1226,10 @@ def build_report(rows, changes_map, errors, run_meta, updates, keep):
             "<span class='star' data-n='%d'>★</span>" % n for n in range(1, 6))
         parts.append("<span class='stars' data-game='%s' data-stars='%d'>%s</span>"
                      % (e(gname), stars, star_html))
+        # FR-11: 按作品静音开关
+        muted = not MOD.alert_prefs(g, gname, r.get("x_handle") or "").get("mute", True)
+        parts.append("<button class='unbtn mutebtn' data-game='%s' title='静音/恢复该作品提醒'>%s</button>"
+                     % (e(gname), "🔕 已静音" if muted else "🔔 提醒"))
         parts.append("<button class='unbtn' data-game='%s'>取消关注</button>" % e(gname))
         parts.append("</div></div>")  # /cardhead
         links = []
@@ -851,6 +1245,52 @@ def build_report(rows, changes_map, errors, run_meta, updates, keep):
             links.append("<a href='%s' target='_blank' rel='noopener'>DLsite %s</a>" % (du, e(did)))
         if links:
             parts.append("<div class='meta'>%s</div>" % " &nbsp;·&nbsp; ".join(links))
+
+        # ---- 作品档案证据区(FR-05/06/07/08/12): 每项带来源与抓取时间 ----
+        parts.append(_facts_html(g, gname, e))
+
+        # ---- 事件时间线(FR-09/10): 跨来源合并后的事件, 附全部证据 ----
+        evs = MOD.row_events(g, gname, limit=8)
+        if evs:
+            parts.append("<div class='evhead'>事件时间线(跨来源已去重)</div><div class='evlist'>")
+            for ev in evs:
+                srcs = ev.get("sources") or []
+                src_html = " · ".join(
+                    "<a href='%s' target='_blank' rel='noopener'>%s</a>" % (
+                        e(s.get("url") or "#"), e(s.get("src") or "?"))
+                    for s in srcs if s.get("url")) or "—"
+                et = ev.get("etype") or "other"
+                detail_id = "evd-%s" % ev.get("key", "")[:12]
+                more = ("" if len(srcs) <= 1 else
+                        " <span class='evmore' data-evd='%s'>证据×%d ▾</span>" % (
+                            detail_id, ev.get("count") or len(srcs)))
+                parts.append(
+                    "<div class='evrow'><span class='evk k-%s'>%s</span>%s"
+                    "<span class='evt'>%s → %s</span>"
+                    "<span class='evsrc'>%s%s</span>"
+                    "<div class='evdetail' id='%s'>%s</div></div>" % (
+                        e(et), e(MOD.EVENT_LABEL.get(et, et)),
+                        e(ev.get("title") or ""),
+                        e((ev.get("first_at") or "")[5:16]),
+                        e((ev.get("last_at") or "")[5:16]),
+                        src_html, more, detail_id,
+                        "<br>".join(
+                            "[%s %s] %s" % (e(s.get("src") or ""),
+                                            e((s.get("at") or "")[5:16]),
+                                            e((s.get("text") or "")[:160]))
+                            for s in srcs)))
+            parts.append("</div>")
+
+        # ---- FR-08 同作者的其它作品 ----
+        if r.get("x_handle"):
+            sibs = [x for x in MOD.works_by_creator(rows, r["x_handle"])
+                    if (x.get("name") or "") != gname]
+            if sibs:
+                parts.append("<div class='otherworks'>该作者(@%s)其它作品: %s</div>" % (
+                    e(r["x_handle"]),
+                    " ".join("<a href='#' data-jump='%s'>%s</a>" % (
+                        e(s.get("name") or ""), e(s.get("name") or ""))
+                        for s in sibs)))
 
         if hist:
             parts.append("<div class='updhead'>最近更新(最多 %d 条, 新在上):</div>" % keep)
@@ -942,8 +1382,33 @@ def save_rows(rows):
             w.writerow({k: r.get(k, "") for k in FIELDS})
 
 
-def pull_row(r, errors):
-    """拉取单行三个源, 返回变化列表; 就地更新行字段。基线(字段为空)只记录不计更新。"""
+def _x_event_norm(etype, text, post_id):
+    """FR-10 归一化键: demo/lang/listing 用类型本身(跨来源合并); 发售/延期取
+    文中日期; 价格取文中金额; 都取不到就退回帖子 id(仅同帖合并)。"""
+    if etype in ("demo", "lang", "listing", "version", "other", "x_post"):
+        if etype == "version":
+            m = re.search(r"\bv?\d+\.\d+(?:\.\d+)?\b", text or "")
+            return m.group(0) if m else etype
+        return etype
+    if etype in ("release", "delay"):
+        m = re.search(r"(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})", text or "")
+        if m:
+            return "%s-%02d-%02d" % (m.group(1), int(m.group(2)), int(m.group(3)))
+        m = re.search(r"(\d{1,2})月(\d{1,2})日", text or "")
+        if m:
+            return "%s-%02d-%02d" % (datetime.now().year, int(m.group(1)), int(m.group(2)))
+        return etype
+    if etype == "price":
+        m = re.search(r"[¥￥$]\s?([\d,]+)", text or "")
+        if m:
+            return m.group(1).replace(",", "")
+        return etype
+    return post_id or etype
+
+
+def pull_row(r, errors, g, alert_log):
+    """拉取单行三个源, 返回变化列表; 就地更新行字段。基线(字段为空)只记录不计更新。
+    g: graph.json 证据库(事实/事件/候选); alert_log: 收集应弹窗的新事件。"""
     changes = []
     events = []
     name = r.get("name") or "(未命名)"
@@ -980,12 +1445,25 @@ def pull_row(r, errors):
                                 md = None  # 媒体抓失败不阻塞更新本身
                             changes.append(("X", "X @%s 新帖: %s %s" % (handle, preview, purl),
                                             md))
+                            # FR-09/10: 重要更新识别 + 跨来源事件合并
+                            etype = MOD.classify_event_text(p["text"], "x")
+                            norm = _x_event_norm(etype, p["text"], p["id"])
+                            ev, is_new = MOD.upsert_event(
+                                g, name, etype,
+                                "%s: %s" % (MOD.EVENT_LABEL.get(etype, etype),
+                                            preview[:80]),
+                                {"src": "X", "url": purl, "text": p["text"][:300]},
+                                norm=norm)
+                            if is_new and MOD.should_notify(g, name, etype, "x", handle):
+                                alert_log.append((name, etype, ev))
                         for p in new_posts:
                             events.append((now_str(), name, "X",
                                            "新帖 https://x.com/%s/status/%s" % (handle, p["id"])))
             time.sleep(0.6)
         except Exception as ex:
             errors.append("X @%s: %s" % (handle, ex))
+            MOD.record_fact(g, name, "x_feed", "抓取失败", "X", status="failed",
+                            note=str(ex)[:160])
 
     # --- Steam ---
     apps = [a.strip() for a in (r.get("steam_appid") or "").split(",") if a.strip()]
@@ -1004,6 +1482,56 @@ def pull_row(r, errors):
                 new_map[app] = info["date"]
                 if not first_name and info["name"]:
                     first_name = info["name"]
+                surl = "https://store.steampowered.com/app/%s" % app
+                # FR-05 事实: 发售日/价格/类型/Demo/语言, 各带来源与抓取时间
+                prev_f = MOD.latest_fact(g, name, "release_date", src="Steam")
+                prev_norm = (prev_f or {}).get("v") or ""
+                nd = parse_steam_date(info["date"]) or ""
+                st, st_note = MOD.classify_release(
+                    nd, info["coming"], prev_date=prev_norm,
+                    author_claimed=bool((r.get("expected_release") or "").strip()))
+                MOD.record_fact(g, name, "release_date", nd or info["date"] or "",
+                                "Steam", url=surl, status=st, note=st_note)
+                MOD.record_fact(g, name, "release_status", st, "Steam", url=surl,
+                                status=st, note=MOD.RELEASE_LABEL.get(st, st))
+                pt = price_text(info["price"])
+                new_pv = pt or ("免费" if info["is_free"] else "未标价")
+                prev_p = MOD.latest_fact(g, name, "price", src="Steam")
+                MOD.record_fact(g, name, "price", new_pv, "Steam", url=surl,
+                                status="free" if info["is_free"] else ("ok" if pt else "none"))
+                MOD.record_fact(g, name, "genres", ", ".join(info["genres"]),
+                                "Steam", url=surl)
+                if info["languages"]:
+                    MOD.record_fact(g, name, "language", ", ".join(info["languages"][:12]),
+                                    "Steam", url=surl)
+                # FR-12 Demo: appdetails.demos 字段(本体页入口+独立Demo页)
+                dst = MOD.demo_state_from_steam(info["demos"])
+                prev_demo = MOD.latest_fact(g, name, "demo", src="Steam")
+                MOD.record_fact(g, name, "demo", dst, "Steam", url=surl,
+                                status=dst, note="%s" % ",".join(info["demos"])
+                                if info["demos"] else "")
+                if dst != "none" and (not prev_demo or prev_demo.get("v") != dst):
+                    ev, is_new = MOD.upsert_event(
+                        g, name, "demo",
+                        "Steam 出现 Demo(%s)" % (",".join(info["demos"]) or "入口"),
+                        {"src": "Steam", "url": surl, "text": "demos=%s" % info["demos"]},
+                        norm="demo")
+                    if is_new and MOD.should_notify(g, name, "demo", "steam", handle):
+                        alert_log.append((name, "demo", ev))
+                # 价格变化事件(FR-09)
+                if (prev_p and prev_p.get("v") and prev_p["v"] != new_pv
+                        and prev_p["v"] not in ("免费", "未标价")
+                        and new_pv not in ("免费", "未标价")):
+                    ev, is_new = MOD.upsert_event(
+                        g, name, "price",
+                        "Steam 价格 %s -> %s" % (prev_p["v"], new_pv),
+                        {"src": "Steam", "url": surl,
+                         "text": "%s -> %s" % (prev_p["v"], new_pv)},
+                        norm=new_pv)
+                    if is_new and MOD.should_notify(g, name, "price", "steam", handle):
+                        alert_log.append((name, "price", ev))
+                    changes.append(("Steam", "Steam 价格变化: %s -> %s"
+                                    % (prev_p["v"], new_pv)))
                 time.sleep(0.5)
             if not (r.get("steam_last_release") or "").strip():
                 r["steam_last_release"] = json.dumps(new_map, ensure_ascii=False)
@@ -1015,6 +1543,18 @@ def pull_row(r, errors):
                     if date_key(o) != date_key(n):
                         diffs.append("%s: %s -> %s" % (app, o or "(无)", n or "(无)"))
                         events.append((now_str(), name, "Steam", "%s 发售日 %s -> %s" % (app, o or "(无)", n or "(无)")))
+                        # FR-06: 新日期晚于旧日期 = 延期; 否则发售日变更
+                        od, nd2 = parse_steam_date(o), parse_steam_date(n)
+                        etype = "delay" if (od and nd2 and nd2 > od) else "release"
+                        ev, is_new = MOD.upsert_event(
+                            g, name, etype,
+                            "Steam 发售日 %s -> %s" % (o or "(无)", n or "(无)"),
+                            {"src": "Steam",
+                             "url": "https://store.steampowered.com/app/%s" % app,
+                             "text": "%s -> %s" % (o or "(无)", n or "(无)")},
+                            norm=nd2 or n or "date")
+                        if is_new and MOD.should_notify(g, name, etype, "steam", handle):
+                            alert_log.append((name, etype, ev))
                 if diffs:
                     changes.append(("Steam", "Steam 发售日变化: " + "; ".join(diffs)))
                 # 恒回写: 语言/格式差异(日文->英文)静默归一, 不计更新
@@ -1025,12 +1565,45 @@ def pull_row(r, errors):
                 name = first_name
         except Exception as ex:
             errors.append("Steam %s: %s" % (r.get("steam_appid"), ex))
+            MOD.record_fact(g, name, "steam_feed", "抓取失败", "Steam",
+                            status="failed", note=str(ex)[:160])
 
     # --- DLsite ---
     did = (r.get("dlsite_id") or "").strip()
     if did:
         try:
             info = fetch_dlsite(did)
+            durl = info.get("url") or "https://www.dlsite.com/maniax/work/=/product_id/%s.html" % did
+            dl_st = MOD.classify_release(info["date"] or "", False,
+                                         author_claimed=bool((r.get("expected_release") or "").strip()))[0]
+            MOD.record_fact(g, name, "release_date", info["date"] or "",
+                            "DLsite", url=durl, status=dl_st)
+            MOD.record_fact(g, name, "release_status", dl_st, "DLsite", url=durl,
+                            status=dl_st, note=MOD.RELEASE_LABEL.get(dl_st, dl_st))
+            if info.get("price"):
+                MOD.record_fact(g, name, "price",
+                                "%s [%s·%s]" % (info["price"]["formatted"],
+                                                info["price"]["currency"],
+                                                info["price"]["region"]),
+                                "DLsite", url=durl, status="ok")
+            if info.get("genres"):
+                MOD.record_fact(g, name, "genres", ", ".join(info["genres"][:8]),
+                                "DLsite", url=durl)
+            if info.get("languages"):
+                MOD.record_fact(g, name, "language", ", ".join(info["languages"]),
+                                "DLsite", url=durl)
+            # FR-12: 体験版(独立试玩文件)
+            dst = MOD.demo_state_from_dlsite(info.get("trial"))
+            prev_demo = MOD.latest_fact(g, name, "demo", src="DLsite")
+            MOD.record_fact(g, name, "demo", dst, "DLsite", url=durl, status=dst,
+                            note=info.get("trial_url") or "")
+            if dst != "none" and (not prev_demo or prev_demo.get("v") in ("none", None, "")):
+                ev, is_new = MOD.upsert_event(
+                    g, name, "demo", "DLsite 出现体験版",
+                    {"src": "DLsite", "url": durl, "text": info.get("trial_url") or "trial"},
+                    norm="demo")
+                if is_new and MOD.should_notify(g, name, "demo", "dlsite", handle):
+                    alert_log.append((name, "demo", ev))
             old = (r.get("dlsite_last_release") or "").strip()
             if not old:
                 r["dlsite_last_release"] = info["date"] or "(无販売日)"
@@ -1038,6 +1611,14 @@ def pull_row(r, errors):
             elif info["date"] and info["date"] != old:
                 changes.append(("DLsite", "DLsite 販売日: %s -> %s" % (old, info["date"])))
                 events.append((now_str(), name, "DLsite", "販売日 %s -> %s" % (old, info["date"])))
+                etype = "delay" if info["date"] > old else "release"
+                ev, is_new = MOD.upsert_event(
+                    g, name, etype,
+                    "DLsite 販売日 %s -> %s" % (old, info["date"]),
+                    {"src": "DLsite", "url": durl, "text": "%s -> %s" % (old, info["date"])},
+                    norm=info["date"])
+                if is_new and MOD.should_notify(g, name, etype, "dlsite", handle):
+                    alert_log.append((name, etype, ev))
                 r["dlsite_last_release"] = info["date"]
             if not (r.get("name") or "").strip() and info.get("title"):
                 r["name"] = info["title"]
@@ -1045,6 +1626,8 @@ def pull_row(r, errors):
             time.sleep(0.8)
         except Exception as ex:
             errors.append("DLsite %s: %s" % (did, ex))
+            MOD.record_fact(g, name, "dlsite_feed", "抓取失败", "DLsite",
+                            status="failed", note=str(ex)[:160])
 
     # --- 预计发售自动填(只填空, 不覆盖手填) ---
     if not (r.get("expected_release") or "").strip():
@@ -1155,13 +1738,15 @@ def _run():
     keep = cfg["keep_updates"]
     updates = load_updates()
     run_time = now_str()
+    g = MOD.load_graph()
+    alert_log = []   # (作品, 事件类型, event) — FR-11 过滤后应弹窗的
 
     rows = load_rows()
     print("关注表 %d 个游戏, 开始拉取...(每游戏保留最近 %d 次更新)" % (len(rows), keep))
     for r in rows:
         print(" - %s" % (r.get("name") or r.get("x_handle") or r.get("steam_appid") or "?"))
         try:
-            chg, evs = pull_row(r, errors)
+            chg, evs = pull_row(r, errors, g, alert_log)
         except Exception as ex:
             errors.append("行级异常 %s: %s" % (r.get("name"), ex))
             chg, evs = [], []
@@ -1184,22 +1769,44 @@ def _run():
     save_rows(rows)
     save_updates(updates)
     append_events(all_events)
+    try:
+        MOD.save_graph(g)
+    except Exception as ex:
+        errors.append("graph.json 保存失败: %s" % ex)
     elapsed = "%.1fs" % (time.time() - t0)
     build_report(rows, changes_map, errors, {"time": run_time, "elapsed": elapsed},
-                 updates, keep)
+                 updates, keep, g)
 
     n_upd = len(changes_map)
     print()
-    print("完成: 本轮 %d 个游戏有更新, %d 个源失败, 耗时 %s" % (n_upd, len(errors), elapsed))
+    print("完成: 本轮 %d 个游戏有更新, %d 个重要事件待提醒, %d 个源失败, 耗时 %s"
+          % (n_upd, len(alert_log), len(errors), elapsed))
     print("报告: %s" % REPORT_PATH)
 
     # 自动带起本地服务(星星评分/取消关注要靠它写表), 已在跑则跳过
     ensure_server()
 
-    if n_upd:
-        first = next(iter(changes_map.values()))
+    # FR-11: 只有通过提醒偏好的事件才弹窗; 普通 X 帖只进报告(低噪声)
+    if alert_log:
+        # 同类合并一条通知, 附来源与作品
+        by_type = {}
+        for gname, etype, ev in alert_log:
+            by_type.setdefault(etype, []).append((gname, ev))
+        lines = []
+        for etype, items in by_type.items():
+            label = MOD.EVENT_LABEL.get(etype, etype)
+            srcs = sorted({s.get("src", "") for _, ev in items
+                           for s in ev.get("sources", [])})
+            names = sorted({n for n, _ in items})
+            lines.append("%s×%d: %s (%s)" % (label, len(items),
+                                             "/".join(names[:3]),
+                                             "+".join(x for x in srcs if x)))
+        notify("黄油关注提示 - 重要更新",
+               "%d 个事件。%s" % (len(alert_log), "; ".join(lines[:4])),
+               icon="Information")
+    elif n_upd:
         notify("黄油关注提示",
-               "%d 个游戏有更新。例: %s" % (n_upd, first[0][1][:80]),
+               "%d 个游戏有新动态(普通帖, 见报告)。" % n_upd,
                icon="Information")
     elif errors:
         notify("黄油关注提示 - 拉取有错误",

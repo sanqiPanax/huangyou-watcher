@@ -14,6 +14,14 @@ media/
 _x_out.json
 _x_err.txt
 .pull.lock
+graph.json
+graph.json.corrupt-*
+graph.json.tmp
+
+# ---- 自测产物 ----
+_selftest_out/
+_probe_net*.py
+_probe_net*.txt
 
 # ---- 运行时 ----
 __pycache__/
