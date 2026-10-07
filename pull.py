@@ -793,6 +793,7 @@ READ_JS = """
         if(e.dataTransfer) e.dataTransfer.dropEffect='copy';
         addTa.classList.add('dropping');
         if(addPanel) addPanel.classList.add('dropping');
+        diagDrag(e);   // 自诊断: 浏览器这次拖拽给了什么数据类型
       });
     });
     ['dragleave','dragend'].forEach(function(ev){
@@ -805,6 +806,30 @@ READ_JS = """
   }
   wireDrop(addTa);      // 输入框本体
   wireDrop(addPanel);   // 整个面板(拖不中小框时的兜底)
+
+  /* 自诊断: 拖动过程中把浏览器给的 dataTransfer 类型显示出来。
+     若拖标签页时这里始终空白 = 浏览器压根没把标签拖拽交给网页(不是代码问题)。 */
+  function diagDrag(e){
+    var box=document.getElementById('drop-diag');
+    if(!box) return;
+    var t='';
+    try{
+      var dt=e.dataTransfer;
+      if(!dt){ t='(无 dataTransfer)'; }
+      else if(dt.types&&dt.types.length){
+        t=Array.prototype.slice.call(dt.types).join(', ');
+        // 试着读一次 uri-list(仅在 dragover 阶段多数浏览器拒绝读取, 会被 try 吃掉)
+        var ul='';
+        try{ul=dt.getData('text/uri-list');}catch(err){ul='(此阶段不可读)';}
+        if(ul) t+=' | uri-list: '+ul.replace(/\\s+/g,' ').slice(0,160);
+      } else {
+        t='(types 为空 — 浏览器没提供任何拖拽数据)';
+      }
+    }catch(err){ t='(读取失败: '+err.message+')'; }
+    box.style.display='block';
+    box.innerHTML='🔍 当前拖拽提供的数据: <b>'+t+'</b>';
+  }
+  // 拖拽离开面板时也保留最后一次诊断结果(不自动清空, 方便你截给我看)
 
   var addGo=document.getElementById('add-go');
   if(addGo) addGo.addEventListener('click',function(){
@@ -1124,6 +1149,9 @@ def build_report(rows, changes_map, errors, run_meta, updates, keep, g=None):
         "支持: X帖子链接 / X裸主页 / Steam页 / DLsite页; 也支持逗号+换行混排'></textarea>"
         "<div class='drophint'>💡 直接把浏览器里选中的标签页拖进上面输入框 — "
         "自动识别其中的网址(拖单个标签最稳; 多选拖入取决于浏览器, 只进来一个就用扩展或复制粘贴)</div>"
+        "<div id='drop-diag' style='display:none;margin-top:6px;padding:7px 10px;"
+        "background:#12151c;border:1px solid #2a3142;border-radius:8px;"
+        "font-size:12px;color:#9aa4b8;word-break:break-all;'></div>"
         "<div class='row'>"
         "<button class='btn' id='add-go'>开始添加</button>"
         "<button class='btn' id='add-log-btn'>查看后台日志</button>"
