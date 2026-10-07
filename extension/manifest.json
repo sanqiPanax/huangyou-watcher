@@ -1,10 +1,13 @@
 {
   "manifest_version": 3,
   "name": "黄油关注 · 导入选中标签页",
-  "version": "0.1.0",
-  "description": "把当前窗口里 Ctrl/Shift 选中的标签页一次导入 huangyou-watcher 本地关注表。只在你点击扩展按钮后读取选中标签页, 不扫描浏览历史, 不读取其他标签页。",
-  "permissions": ["tabs", "clipboardWrite", "storage"],
+  "version": "0.2.0",
+  "description": "把当前窗口里 Ctrl/Shift 选中的标签页一次导入 huangyou-watcher 本地关注表。右键标签页可'仅复制网址(逗号分隔)'; 点扩展按钮打开导入面板。只在你点击后读取选中标签页, 不扫描浏览历史。",
+  "permissions": ["tabs", "clipboardWrite", "storage", "contextMenus", "offscreen"],
   "host_permissions": ["http://127.0.0.1:8790/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
   "action": {
     "default_popup": "popup.html",
     "default_title": "导入选中标签页"

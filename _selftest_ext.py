@@ -119,13 +119,45 @@ ck("扩展 MV3", mf["manifest_version"] == 3)
 ck("扩展 权限含tabs(FR-17)", "tabs" in mf["permissions"])
 ck("扩展 剪贴板权限(FR-20)", "clipboardWrite" in mf["permissions"])
 ck("扩展 仅回环host权限", mf["host_permissions"] == ["http://127.0.0.1:8790/*"])
-ck("扩展 无后台常驻(点击才读)", "background" not in mf)
 ck("扩展 popup入口", mf["action"]["default_popup"] == "popup.html")
+
+# ---- FR-17: background 可以存在(右键菜单需要), 但必须"不点不读" ----
+bg_path = os.path.join(ext, mf.get("background", {}).get("service_worker", "background.js"))
+ck("扩展 background 已注册", os.path.exists(bg_path))
+bg = open(bg_path, encoding="utf-8").read() if os.path.exists(bg_path) else ""
+# 读标签只允许出现在事件回调内 -> 检查 tabs.query 是否位于 onClicked 回调之后且不在启动路径
+q_idx = bg.find("chrome.tabs.query")
+clicked_idx = bg.find("onClicked.addListener")
+ck("FR-17 background 读标签仅在右键点击回调链内",
+   q_idx > 0 and clicked_idx > 0 and q_idx > clicked_idx)
+# 启动路径(onInstalled)里不得读标签
+installed_end = bg.find("onInstalled.addListener")
+if installed_end > 0:
+    seg = bg[installed_end:installed_end + 400]
+    ck("FR-17 onInstalled 不读标签", "chrome.tabs.query" not in seg)
+else:
+    ck("FR-17 onInstalled 不读标签", True)
+ck("FR-17 background 无history引用", "chrome.history" not in bg)
+ck("FR-17 无history权限", "history" not in mf.get("permissions", []))
+ck("扩展 contextMenus 权限(右键菜单)", "contextMenus" in mf["permissions"])
+ck("扩展 offscreen 权限(剪贴板)", "offscreen" in mf["permissions"])
+# 右键复制功能静态检查
+ck("右键菜单已创建", "contextMenus.create" in bg)
+ck("右键菜单只复制选中标签(highlighted)",
+   "highlighted: true" in bg or "highlighted:true" in bg)
+ck("右键复制用逗号拼接(用户要求格式)",
+   'urls.join(",")' in bg.replace(" ", ""))
+ck("非http标签被过滤(存在 /^https?:\\/\\// 正则)", "https?:\\/\\//" in bg)
+ck("offscreen 剪贴板文档存在",
+   os.path.exists(os.path.join(ext, "offscreen.html"))
+   and os.path.exists(os.path.join(ext, "offscreen.js")))
+offjs = open(os.path.join(ext, "offscreen.js"), encoding="utf-8").read() if os.path.exists(
+    os.path.join(ext, "offscreen.js")) else ""
+ck("offscreen 写剪贴板", "clipboard.writeText" in offjs or "execCommand" in offjs)
 
 js = open(os.path.join(ext, "popup.js"), encoding="utf-8").read()
 ck("FR-17 只查当前窗口选中标签",
    "currentWindow: true" in js and "highlighted: true" in js)
-ck("FR-17 无history权限", "history" not in mf.get("permissions", []))
 ck("FR-18 预览字段(标题/域名/网址)",
    "p.title" in js and "p.url" in js and "domainOf" in js)
 ck("FR-18 可取消单页", "p.removed = true" in js)
