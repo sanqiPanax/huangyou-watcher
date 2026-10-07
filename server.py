@@ -144,11 +144,17 @@ class H(BaseHTTPRequestHandler):
             urls = [base + "/v1/chat/completions", base + "/chat/completions"]
         body = json.dumps({"model": model, "temperature": 0,
                            "messages": [{"role": "user", "content": prompt}]}).encode("utf-8")
+        extra = cfg.get("headers")
         last = None
         for u in urls:
-            headers = {"Content-Type": "application/json"}
+            headers = {"Content-Type": "application/json",
+                       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                                     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"}
             if key:
                 headers["Authorization"] = "Bearer " + key
+            if isinstance(extra, dict):
+                for hk, hv in extra.items():
+                    headers[str(hk)] = str(hv)
             try:
                 req = urllib.request.Request(u, data=body, headers=headers)
                 with urllib.request.urlopen(req, timeout=timeout, context=_CTX) as r:
@@ -169,10 +175,12 @@ class H(BaseHTTPRequestHandler):
             return
 
         if self.path.startswith("/api/llm_config"):
-            # 保存 {base_url, api_key, model}; 空 base_url=清除配置(回退 DeepSeek)
+            # 保存 {base_url, api_key, model, headers?}; 空 base_url=清除配置(回退 DeepSeek)
             cfg = {"base_url": str(data.get("base_url") or "").strip(),
                    "api_key": str(data.get("api_key") or "").strip(),
                    "model": str(data.get("model") or "").strip()}
+            if isinstance(data.get("headers"), dict) and data["headers"]:
+                cfg["headers"] = {str(k): str(v) for k, v in data["headers"].items()}
             if not cfg["base_url"]:
                 if os.path.exists(LLM_PATH):
                     os.remove(LLM_PATH)
@@ -188,6 +196,8 @@ class H(BaseHTTPRequestHandler):
             cfg = {"base_url": str(data.get("base_url") or "").strip(),
                    "api_key": str(data.get("api_key") or "").strip(),
                    "model": str(data.get("model") or "").strip()}
+            if isinstance(data.get("headers"), dict) and data["headers"]:
+                cfg["headers"] = {str(k): str(v) for k, v in data["headers"].items()}
             if not cfg["base_url"]:
                 self._json({"error": "先填 base_url"}, 400)
                 return

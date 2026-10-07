@@ -612,15 +612,26 @@ READ_JS = """
   function loadLlm(){
     fetch(API+'/api/llm_config').then(function(r){return r.json();}).then(function(j){
       var c=j.config||{};
-      var u=document.getElementById('llm-url'),k=document.getElementById('llm-key'),m=document.getElementById('llm-model');
+      var u=document.getElementById('llm-url'),k=document.getElementById('llm-key'),
+          m=document.getElementById('llm-model'),h=document.getElementById('llm-hdr');
       if(u) u.value=c.base_url||''; if(k) k.value=c.api_key||''; if(m) m.value=c.model||'';
+      if(h) h.value=c.headers?JSON.stringify(c.headers):'';
       if(c.base_url) setMsg('llm-msg','已配置: '+c.base_url+' ('+(c.model||'?')+')','ok');
     }).catch(function(){setMsg('llm-msg','读取失败(本地服务未启动)','err');});
   }
   function llmVal(id){var el=document.getElementById(id);return el?(el.value||'').trim():'';}
+  function llmPayload(){
+    var p={base_url:llmVal('llm-url'),api_key:llmVal('llm-key'),model:llmVal('llm-model')};
+    var hs=llmVal('llm-hdr');
+    if(hs && hs!=='{}'){
+      try{ p.headers=JSON.parse(hs); }
+      catch(e){ setMsg('llm-msg','额外 Header 不是合法 JSON','warn'); return null; }
+    }
+    return p;
+  }
   var llmSave=document.getElementById('llm-save');
   if(llmSave) llmSave.addEventListener('click',function(){
-    var payload={base_url:llmVal('llm-url'),api_key:llmVal('llm-key'),model:llmVal('llm-model')};
+    var payload=llmPayload(); if(!payload) return;
     if(!payload.base_url){setMsg('llm-msg','Base URL 为空(要清除请点"清除")','warn');return;}
     post('/api/llm_config',payload).then(function(){
       setMsg('llm-msg','已保存到 llm.json (仅本地, 不进 Git)','ok');
@@ -630,7 +641,7 @@ READ_JS = """
   });
   var llmTest=document.getElementById('llm-test');
   if(llmTest) llmTest.addEventListener('click',function(){
-    var payload={base_url:llmVal('llm-url'),api_key:llmVal('llm-key'),model:llmVal('llm-model')};
+    var payload=llmPayload(); if(!payload) return;
     if(!payload.base_url){setMsg('llm-msg','先填 Base URL','warn');return;}
     llmTest.disabled=true; setMsg('llm-msg','测试中(最长40秒)...','');
     post('/api/llm_test',payload).then(function(j){
@@ -644,8 +655,9 @@ READ_JS = """
   var llmClear=document.getElementById('llm-clear');
   if(llmClear) llmClear.addEventListener('click',function(){
     post('/api/llm_config',{base_url:''}).then(function(){
-      var u=document.getElementById('llm-url'),k=document.getElementById('llm-key'),m=document.getElementById('llm-model');
-      if(u)u.value='';if(k)k.value='';if(m)m.value='';
+      var u=document.getElementById('llm-url'),k=document.getElementById('llm-key'),
+          m=document.getElementById('llm-model'),h=document.getElementById('llm-hdr');
+      if(u)u.value='';if(k)k.value='';if(m)m.value='';if(h)h.value='';
       setMsg('llm-msg','已清除, 回退 DeepSeek','ok');
     }).catch(function(e){setMsg('llm-msg','清除失败: '+e.message,'err');});
   });
@@ -721,6 +733,8 @@ def build_report(rows, changes_map, errors, run_meta, updates, keep):
         "<input id='llm-key' type='password' spellcheck='false' placeholder='sk-...'>"
         "<label>模型名</label>"
         "<input id='llm-model' spellcheck='false' placeholder='例: qwen3-coder / deepseek-chat'>"
+        "<label>额外 Header (JSON, 可选 — 某些网关要求, 如 opencode-go 的 session 头)</label>"
+        "<input id='llm-hdr' spellcheck='false' placeholder='例如: {&quot;x-opencode-session&quot;: &quot;xxx&quot;}'>"
         "<div class='row'>"
         "<button class='btn' id='llm-save'>保存</button>"
         "<button class='btn' id='llm-test'>测试连接</button>"

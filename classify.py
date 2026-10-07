@@ -67,38 +67,45 @@ def _load_llm():
     return None
 
 
-def _chat(messages, timeout=60):
-    """统一 chat 出口: llm.json 配置的端点优先, 否则 DeepSeek。返回 content 字符串。"""
-    cfg = _load_llm()
-    if cfg:
-        base = str(cfg["base_url"]).rstrip("/")
-        key = str(cfg.get("api_key") or "")
-        model = str(cfg.get("model") or "")
-        if base.endswith("/chat/completions"):
-            urls = [base]
-        elif base.endswith("/v1"):
-            urls = [base + "/chat/completions"]
-        else:
-            urls = [base + "/v1/chat/completions", base + "/chat/completions"]
-        body = json.dumps({"model": model, "temperature": 0, "messages": messages}).encode("utf-8")
-        last = None
-        for u in urls:
-            headers = {"Content-Type": "application/json"}
-            if key:
-                headers["Authorization"] = "Bearer " + key
-            try:
-                req = urllib.request.Request(u, data=body, headers=headers)
-                with urllib.request.urlopen(req, timeout=timeout, context=CTX) as r:
-                    d = json.loads(r.read())
-                return str(d["choices"][0]["message"]["content"])
-            except Exception as ex:
-                last = ex
-        raise RuntimeError("llm.json 端点调用失败: %r" % last)
+def _openai_chat(cfg, messages, timeout):
+    """调 llm.json 配置的 OpenAI 兼容端点; 支持自定义 header(如 x-opencode-session)。"""
+    base = str(cfg.get("base_url") or "").rstrip("/")
+    key = str(cfg.get("api_key") or "")
+    model = str(cfg.get("model") or "")
+    if not base:
+        raise RuntimeError("base_url 为空")
+    if base.endswith("/chat/completions"):
+        urls = [base]
+    elif base.endswith("/v1"):
+        urls = [base + "/chat/completions"]
+    else:
+        urls = [base + "/v1/chat/completions", base + "/chat/completions"]
+    body = json.dumps({"model": model, "temperature": 0, "messages": messages}).encode("utf-8")
+    last = None
+    for u in urls:
+        headers = {"Content-Type": "application/json",
+                   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                                 "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"}
+        if key:
+            headers["Authorization"] = "Bearer " + key
+        extra = cfg.get("headers")
+        if isinstance(extra, dict):
+            for hk, hv in extra.items():
+                headers[str(hk)] = str(hv)
+        try:
+            req = urllib.request.Request(u, data=body, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout, context=CTX) as r:
+                d = json.loads(r.read())
+            return str(d["choices"][0]["message"]["content"])
+        except Exception as ex:
+            last = ex
+    raise RuntimeError("llm.json 端点调用失败: %r" % last)
 
-    # 回退: DeepSeek(需要 key)
+
+def _deepseek_chat(messages, timeout):
     key = _get_key()
     if not key:
-        raise RuntimeError("没有可用模型: llm.json 未配置且 DeepSeek key 缺失")
+        raise RuntimeError("DeepSeek key 缺失")
     body = json.dumps({"model": "deepseek-chat", "temperature": 0,
                        "max_tokens": 4096, "messages": messages}).encode("utf-8")
     req = urllib.request.Request(
@@ -107,6 +114,17 @@ def _chat(messages, timeout=60):
     with urllib.request.urlopen(req, timeout=timeout, context=CTX) as r:
         d = json.loads(r.read())
     return str(d["choices"][0]["message"]["content"])
+
+
+def _chat(messages, timeout=60):
+    """统一 chat 出口: llm.json 端点优先; 失败回退 DeepSeek(README 承诺的行为)。"""
+    cfg = _load_llm()
+    if cfg:
+        try:
+            return _openai_chat(cfg, messages, timeout)
+        except Exception:
+            pass  # 配置端点挂了 -> 落到 DeepSeek 回退
+    return _deepseek_chat(messages, timeout)
 
 
 def _parse_cat(content):

@@ -52,9 +52,11 @@
 ## 报告页工具栏
 
 - **＋ 批量添加链接**:大输入框,逗号/换行分隔,一次可贴几十个链接;后台执行,带进度日志查看
-- **⚙ 模型 API**:填任意 OpenAI 兼容端点的 `Base URL / API Key / 模型名`,用于 AI 分类
+- **⚙ 模型 API**:填任意 OpenAI 兼容端点的 `Base URL / API Key / 模型名 / 额外 Header`,用于 AI 分类
+  - **已预填 OpenCode Go**(`opencode.ai/zen/go/v1` + `x-opencode-session` 头;key 存本地凭据文件),面板里"测试连接"一键验证
+  - 额外 Header 是给"网关要求自定义头"的服务准备的(JSON 格式),本地 Ollama 等留空即可
   - 配置存本地 `llm.json`(已被 .gitignore 排除,**永远不会提交到 Git**)
-  - 没配置时自动回退 DeepSeek(需要 `DEEPSEEK_API_KEY` 或本地凭据文件)
+  - 没配置、或配置的端点连不上时,自动回退 DeepSeek(需要 `DEEPSEEK_API_KEY` 或本地凭据文件)
 
 ## 文件结构
 
