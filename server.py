@@ -222,6 +222,25 @@ class H(BaseHTTPRequestHandler):
                 except Exception:
                     cfg = {}
             self._json({"ok": True, "config": cfg})
+        elif self.path.startswith("/api/count"):
+            # 报告页是静态快照, 启动时回读真实行数, 避免"添加了但总数没变"的误导
+            try:
+                rows, _f = read_rows()
+                n = len(rows)
+            except Exception:
+                n = -1
+            mtime = 0
+            try:
+                mtime = int(os.path.getmtime(CSV_PATH))
+            except OSError:
+                pass
+            rtime = 0
+            try:
+                rtime = int(os.path.getmtime(os.path.join(BASE, "report.html")))
+            except OSError:
+                pass
+            self._json({"ok": True, "rows": n, "csv_mtime": mtime,
+                        "report_mtime": rtime})
         elif self.path.startswith("/api/add_log"):
             tail = ""
             try:

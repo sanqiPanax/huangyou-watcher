@@ -861,14 +861,45 @@ READ_JS = """
     });
   });
   var addLogBtn=document.getElementById('add-log-btn');
+  var logTimer=null, logLast='';
+  function fetchLog(manual){
+    var box=document.getElementById('add-log');
+    if(!box || box.style.display==='none') return;
+    getAuth('/api/add_log').then(function(j){
+      var t=j.log||'(空)';
+      var atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 30;
+      if(t!==logLast){
+        logLast=t;
+        box.textContent=t;
+        if(atBottom || manual) box.scrollTop=box.scrollHeight;
+      }
+      var st=document.getElementById('add-log-st');
+      if(st){
+        st.style.display='block';
+        var running=/完成: 新增 \\d+\\/\\d+/.test(t);
+        // 时间戳每次都刷新 —— 让你确认轮询还活着(日志没变时也看得出)
+        st.textContent = running
+          ? '日志已跑完 · 最后检查 '+new Date().toTimeString().slice(0,8)
+          : '自动刷新中(每2秒) · '+new Date().toTimeString().slice(0,8);
+        st.style.color = running ? '#6fe0a0' : '#f5c451';
+      }
+    }).catch(function(){
+      if(manual) setMsg('add-msg','日志读取失败(本地服务未启动)','err');
+      if(logTimer){clearInterval(logTimer); logTimer=null;}
+    });
+  }
   if(addLogBtn) addLogBtn.addEventListener('click',function(){
     var box=document.getElementById('add-log');
     if(!box) return;
-    getAuth('/api/add_log').then(function(j){
-      box.style.display='block';
-      box.textContent=j.log||'(空)';
-      box.scrollTop=box.scrollHeight;
-    }).catch(function(){setMsg('add-msg','日志读取失败(本地服务未启动)','err');});
+    var showing = box.style.display!=='none';
+    if(showing){                       // 再点 = 关闭并停止轮询
+      box.style.display='none';
+      if(logTimer){clearInterval(logTimer); logTimer=null;}
+      return;
+    }
+    box.style.display='block';
+    fetchLog(true);
+    if(!logTimer) logTimer=setInterval(function(){fetchLog(false);},2000);
   });
 
   // 模型 API 配置
@@ -1041,6 +1072,31 @@ READ_JS = """
     });
   });
 
+  /* ---- 关注表真实行数(报告是静态快照, 与实际不一致时明确提示) ---- */
+  function syncRowCount(){
+    var snap=parseInt((document.querySelector('.stat .chip b')||{}).textContent||'0',10)||0;
+    fetch(API+'/api/count',{headers:{'X-Hyw-Token':HYW_TOKEN}})
+      .then(function(r){return r.json();})
+      .then(function(j){
+        if(!j.ok||j.rows<0) return;
+        var box=document.getElementById('rows-chip-box');
+        var b=document.getElementById('rows-chip');
+        var lbl=document.getElementById('rows-lbl');
+        if(!box||!b) return;
+        box.style.display='';
+        b.textContent=j.rows;
+        if(j.rows!==snap){
+          b.style.color='#f5c451';
+          lbl.innerHTML='关注表实际(报告快照 '+snap+')';
+          box.title='报告页生成于快照时点, 新增/移除不会自动反映。重新跑 拉取.cmd 即可同步。';
+        } else {
+          lbl.textContent='关注表实际';
+        }
+      })
+      .catch(function(){ /* 服务未启动: 静态快照仍是可用的 */ });
+  }
+  syncRowCount();
+
   refresh();
 })();
 """
@@ -1170,6 +1226,7 @@ def build_report(rows, changes_map, errors, run_meta, updates, keep, g=None):
         "<button class='btn' id='add-go'>开始添加</button>"
         "<button class='btn' id='add-log-btn'>查看后台日志</button>"
         "<span class='msg' id='add-msg'></span></div>"
+        "<div class='drophint' id='add-log-st' style='display:none;'></div>"
         "<div class='hint'>后台执行(每条约 30秒~2分钟, 含抓封面+AI分类), 关掉本页也不影响;"
         "完成后需重新拉取或刷新才进报告。已有游戏自动跳过(按 handle/Steam/DLsite 查重)。</div>"
         "<pre id='add-log' style='display:none;margin-top:10px;max-height:260px;overflow:auto;"
@@ -1296,6 +1353,8 @@ def build_report(rows, changes_map, errors, run_meta, updates, keep, g=None):
                  "<div class='chip unread'><b id='unread-chip'>0</b><span>未读更新</span></div>"
                  "<div class='chip'><b>%d</b><span>本轮有更新</span></div>"
                  "<div class='chip'><b>%d</b><span>累计更新总次数</span></div>"
+                 "<div class='chip' id='rows-chip-box' style='display:none'>"
+                 "<b id='rows-chip'>-</b><span id='rows-lbl'>关注表实际</span></div>"
                  "</div>" % (len(rows), updated, total_updates))
 
     if errors:
