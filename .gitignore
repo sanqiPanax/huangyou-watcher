@@ -23,6 +23,12 @@ _selftest_out/
 _probe_net*.py
 _probe_net*.txt
 
+# ---- 本地推送辅助(走 REST API, 含 token 路径引用) ----
+_push_github.py
+_push_log.txt
+_commit_msg.txt
+_gout.txt
+
 # ---- 运行时 ----
 __pycache__/
 *.pyc
