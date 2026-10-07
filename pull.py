@@ -807,10 +807,19 @@ READ_JS = """
   wireDrop(addTa);      // 输入框本体
   wireDrop(addPanel);   // 整个面板(拖不中小框时的兜底)
 
-  /* 自诊断: 拖动过程中把浏览器给的 dataTransfer 类型显示出来。
-     若拖标签页时这里始终空白 = 浏览器压根没把标签拖拽交给网页(不是代码问题)。 */
+  /* 自诊断: 加载即显示"检测就绪", 拖动时改显浏览器给的数据类型。
+     判据: 刷新后必须先看到"就绪+构建时间" —— 看不到=页面是旧的;
+     看得到"就绪"但拖动时这行完全不变 = 浏览器没发 dragover(不是代码问题)。 */
+  function diagBox(){ return document.getElementById('drop-diag'); }
+  function diagReady(){
+    var box=diagBox();
+    if(!box) return;
+    box.style.display='block';
+    box.style.borderColor='#1d4d33';
+    box.innerHTML='✅ 拖拽检测就绪(报告构建 __BUILD_TIME__) — 现在把标签页拖到输入框上方, 这行会变成浏览器提供的数据类型';
+  }
   function diagDrag(e){
-    var box=document.getElementById('drop-diag');
+    var box=diagBox();
     if(!box) return;
     var t='';
     try{
@@ -827,9 +836,14 @@ READ_JS = """
       }
     }catch(err){ t='(读取失败: '+err.message+')'; }
     box.style.display='block';
-    box.innerHTML='🔍 当前拖拽提供的数据: <b>'+t+'</b>';
+    box.style.borderColor='#f5c451';
+    box.innerHTML='🔍 浏览器本次拖拽提供的数据: <b>'+t+'</b>';
   }
-  // 拖拽离开面板时也保留最后一次诊断结果(不自动清空, 方便你截给我看)
+  diagReady();   // 页面一加载就亮"就绪", 用于区分旧页面 vs 浏览器不发事件
+  // document 级兜底: 拖到页面任意位置都记录, 排除"没拖准面板"的干扰
+  ['dragenter','dragover'].forEach(function(ev){
+    document.addEventListener(ev,function(e){ diagDrag(e); },true);
+  });
 
   var addGo=document.getElementById('add-go');
   if(addGo) addGo.addEventListener('click',function(){
@@ -1478,8 +1492,9 @@ def build_report(rows, changes_map, errors, run_meta, updates, keep, g=None):
                  "本地接口 token(装浏览器扩展时粘贴用): <code style='color:#9aa4b8'>%s</code>"
                  " &nbsp;·&nbsp; 同值存 server_token.txt</footer>"
                  % (keep, e(MOD.load_or_create_token())))
-    parts.append("<script>%s</script>" % READ_JS.replace(
-        "__TOKEN__", MOD.load_or_create_token()))
+    parts.append("<script>%s</script>" % READ_JS
+                 .replace("__TOKEN__", MOD.load_or_create_token())
+                 .replace("__BUILD_TIME__", datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     parts.append("</div></body></html>")
     with open(REPORT_PATH, "w", encoding="utf-8") as f:
         f.write("".join(parts))
