@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>导入选中标签页</title>
+<style>
+body{width:520px;margin:0;background:#12151c;color:#dbe2ef;
+     font-family:'Segoe UI',system-ui,sans-serif;font-size:13px;padding:14px;}
+h1{font-size:15px;margin:0 0 4px;color:#fff;}
+.sub{color:#8b94a7;font-size:11.5px;margin-bottom:10px;line-height:1.5;}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;
+     background:#5b6474;vertical-align:middle;}
+.dot.ok{background:#3fae6a;}.dot.bad{background:#e05a5a;}.dot.wait{background:#f5c451;}
+.list{max-height:300px;overflow:auto;border:1px solid #2a3142;border-radius:8px;
+      background:#171c26;margin-bottom:10px;}
+.row{display:flex;gap:8px;align-items:flex-start;padding:8px 10px;
+     border-bottom:1px solid #222836;}
+.row:last-child{border-bottom:none;}
+.row input{margin-top:2px;accent-color:#3fae6a;width:14px;height:14px;flex:none;}
+.row .info{flex:1;min-width:0;}
+.row .t{font-size:12.5px;color:#e7ecf5;white-space:nowrap;overflow:hidden;
+        text-overflow:ellipsis;}
+.row .u{font-size:11px;color:#5b6474;white-space:nowrap;overflow:hidden;
+        text-overflow:ellipsis;}
+.badge{flex:none;font-size:10.5px;border-radius:4px;padding:1px 6px;margin-top:1px;}
+.b-ok{background:#1d4d33;color:#6fe0a0;}
+.b-ex{background:#252b38;color:#9aa4b8;}
+.b-no{background:#4a1d2a;color:#f08aa0;}
+.b-dup{background:#44360f;color:#f5c451;}
+.rm{flex:none;background:none;border:none;color:#5b6474;cursor:pointer;
+    font-size:14px;padding:0 2px;}
+.rm:hover{color:#ff9aa4;}
+.counts{display:flex;gap:12px;color:#8b94a7;font-size:12px;margin-bottom:8px;
+        flex-wrap:wrap;}
+.counts b{color:#fff;}
+.btns{display:flex;gap:8px;flex-wrap:wrap;}
+button{border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer;
+       border:1px solid #364052;background:#232a38;color:#c9d2e3;}
+button:hover{background:#2c3546;}
+button:disabled{opacity:.45;cursor:not-allowed;}
+button.primary{background:#1d4d33;border-color:#3fae6a;color:#b8f5d4;font-weight:600;}
+button.primary:hover{background:#246043;}
+textarea{width:100%;box-sizing:border-box;min-height:70px;background:#12151c;
+         color:#dbe2ef;border:1px solid #364052;border-radius:8px;padding:8px;
+         font-size:11.5px;font-family:Consolas,monospace;resize:vertical;}
+input.tk{width:100%;box-sizing:border-box;background:#12151c;color:#dbe2ef;
+         border:1px solid #364052;border-radius:8px;padding:7px 9px;font-size:12px;
+         font-family:Consolas,monospace;}
+label{display:block;color:#8b94a7;font-size:11.5px;margin:8px 0 3px;}
+.res{border:1px solid #2a3142;border-radius:8px;background:#171c26;
+     margin-top:10px;padding:8px 10px;max-height:220px;overflow:auto;}
+.res .rr{display:flex;gap:8px;align-items:center;padding:4px 0;font-size:12px;
+         border-bottom:1px dashed #222836;}
+.res .rr:last-child{border-bottom:none;}
+.res .rt{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+         color:#a9b2c3;}
+.msg{margin-top:9px;font-size:12.5px;line-height:1.6;min-height:16px;}
+.msg.err{color:#ff9aa4;}.msg.ok{color:#6fe0a0;}.msg.warn{color:#f5c451;}
+.hint{color:#5b6474;font-size:11px;line-height:1.6;margin-top:8px;}
+details{margin-top:8px;}
+summary{cursor:pointer;color:#8b94a7;font-size:12px;}
+.resnum{display:flex;gap:10px;margin-bottom:6px;font-size:11.5px;color:#8b94a7;}
+.resnum b{color:#fff;}
+</style>
+</head>
+<body>
+<h1>导入选中标签页</h1>
+<div class="sub">只读取<b>当前窗口中已选中(Ctrl/Shift 点选)</b>的标签页;
+不读其他标签页、不扫描浏览历史、导入后不关闭标签页。</div>
+
+<div style="font-size:12.5px;margin-bottom:8px;">
+  <span class="dot" id="conn"></span><span id="conn-txt">未检测本地服务</span>
+</div>
+
+<label>选中标签页(取消勾选 = 不导入)</label>
+<div class="list" id="list"><div style="padding:14px;color:#5b6474;">
+正在读取选中标签页...</div></div>
+
+<div class="counts" id="counts" style="display:none;"></div>
+
+<div class="btns">
+  <button class="primary" id="go" disabled>导入勾选的页面</button>
+  <button id="refresh">重新读取</button>
+  <button id="copy" title="本地服务未启动时的备用通道(FR-20)">复制勾选网址</button>
+</div>
+
+<div class="msg" id="msg"></div>
+<div class="res" id="res" style="display:none;"></div>
+
+<details id="tk-box">
+  <summary>本地接口 token / 连接问题排查</summary>
+  <label>token(填一次即记住; 见服务端 server_token.txt 或报告页页脚)</label>
+  <input class="tk" id="token" placeholder="32 位十六进制" spellcheck="false">
+  <div class="btns" style="margin-top:7px;">
+    <button id="tk-save">保存 token</button>
+    <button id="tk-test">测试连接</button>
+  </div>
+  <div class="hint">本地服务未启动时: 双击服务目录里的 拉取.cmd 或 python server.py;
+  仍连不上就用"复制勾选网址", 粘到报告页的批量添加框(FR-20 备用通道)。</div>
+</details>
+
+<div class="hint">提交后状态逐页回传: 已加入 / 已存在 / 待确认 / 失败(含原因)。
+"已提交"不等于"已添加", 请以下方逐页结果为准。</div>
+
+<script src="popup.js"></script>
+</body>
+</html>
