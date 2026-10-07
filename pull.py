@@ -1362,7 +1362,10 @@ def build_report(rows, changes_map, errors, run_meta, updates, keep, g=None):
 
     parts.append("<footer>数据源: X(twitter-cli 公开时间线, <b>不关注/不点赞/不互动</b>) · Steam Web API · DLsite 作品页<br>"
                  "文件: watchlist.csv(关注表,手改加行) · updates.json(每游戏最近 %d 条更新) · config.json(keep_updates) · "
-                 "events.csv(审计日志) · report.html(本报告)</footer>" % keep)
+                 "events.csv(审计日志) · report.html(本报告)<br>"
+                 "本地接口 token(装浏览器扩展时粘贴用): <code style='color:#9aa4b8'>%s</code>"
+                 " &nbsp;·&nbsp; 同值存 server_token.txt</footer>"
+                 % (keep, e(MOD.load_or_create_token())))
     parts.append("<script>%s</script>" % READ_JS.replace(
         "__TOKEN__", MOD.load_or_create_token()))
     parts.append("</div></body></html>")
