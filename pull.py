@@ -386,6 +386,11 @@ h1{font-size:26px;margin:0 0 6px;color:#fff;}
 .panel h3{margin:0 0 10px;font-size:15px;color:#e7ecf5;}
 .panel textarea{width:100%;min-height:150px;background:#12151c;color:#dbe2ef;border:1px solid #364052;border-radius:8px;padding:12px;font-size:13.5px;font-family:Consolas,monospace;resize:vertical;box-sizing:border-box;}
 .panel textarea::placeholder{color:#5b6474;}
+.panel textarea.dropping{border-color:#3fae6a;background:#15221a;
+  box-shadow:0 0 0 2px #3fae6a40;}
+.panel.dropping{border-color:#3fae6a;box-shadow:0 0 0 2px #3fae6a40;}
+.drophint{font-size:12.5px;color:#5b6474;margin-top:6px;}
+.drophint b{color:#3fae6a;}
 .panel input{background:#12151c;color:#dbe2ef;border:1px solid #364052;border-radius:8px;padding:9px 12px;font-size:13.5px;width:100%;box-sizing:border-box;}
 .panel label{display:block;font-size:12.5px;color:#8b94a7;margin:10px 0 4px;}
 .panel .row{display:flex;gap:10px;align-items:center;margin-top:12px;flex-wrap:wrap;}
@@ -725,6 +730,82 @@ READ_JS = """
   }
 
   // 批量添加
+  /* ---- 拖拽导入: 把标签页/链接拖进输入框自动识别多网址 ----
+     浏览器拖标签页给出的是 text/uri-list(可能多行); 拖链接/拖选中文本
+     给出 text/plain 或 text/html。三种都读, 尽量把所有 URL 抽出来。 */
+  function urlsFromDrop(dt){
+    var out=[], seen={};
+    function push(u){
+      if(!u) return;
+      u=String(u).trim().replace(/[.,;:)\\]}>'"]+$/,'');   // 去尾部标点
+      if(!/^https?:\\/\\//i.test(u)) return;
+      if(seen[u]) return;
+      seen[u]=1; out.push(u);
+    }
+    // 1) text/uri-list: 每行一个 URL, # 开头是注释
+    var ul=dt.getData('text/uri-list');
+    if(ul) ul.split(/[\\r\\n]+/).forEach(function(l){
+      l=l.trim();
+      if(l && l.charAt(0)!=='#') push(l);
+    });
+    // 2) text/html: 抽 <a href>
+    var hx=dt.getData('text/html');
+    if(hx){
+      var re=/<a\\s[^>]*href\\s*=\\s*["']([^"']+)["']/gi, m;
+      while((m=re.exec(hx))) push(m[1]);
+    }
+    // 3) text/plain: 抽所有 http(s) 开头的串(兼容纯文本多行/逗号分隔)
+    var pl=dt.getData('text/plain');
+    if(pl){
+      var re2=/https?:\\/\\/[^\\s"'<>,，;；]+/gi, m2;
+      while((m2=re2.exec(pl))) push(m2[0]);
+      // 没匹配到协议时, 整行当一条(浏览器有时给 标题+URL 混排)
+      if(!out.length) pl.split(/[\\r\\n]+/).forEach(function(l){ push(l); });
+    }
+    return out;
+  }
+  var addTa=document.getElementById('add-ta');
+  var addPanel=document.getElementById('p-add');
+  function onDrop(e){
+    e.preventDefault();
+    e.stopPropagation();   // 子元素(textarea)与父面板都绑了, 防止冒泡二次执行
+    addTa.classList.remove('dropping');
+    if(addPanel) addPanel.classList.remove('dropping');
+    var urls=urlsFromDrop(e.dataTransfer||{getData:function(){return '';}});
+    if(!urls.length){
+      setMsg('add-msg','没拖到可识别的网址(浏览器可能只给了标题,试试拖单个标签)','warn');
+      return;
+    }
+    // 合并: 已有内容不覆盖, 追加去重
+    var cur=(addTa.value||'').trim();
+    var all=cur?cur.split(/[\\r\\n,，]+/).filter(Boolean):[];
+    var add=0;
+    urls.forEach(function(u){ if(all.indexOf(u)<0){all.push(u); add++;} });
+    addTa.value=all.join('\\n');
+    setMsg('add-msg','拖入识别到 '+urls.length+' 个网址(新增 '+add+'),点"开始添加"提交','ok');
+    addTa.focus();
+  }
+  function wireDrop(el){
+    if(!el) return;
+    ['dragover','dragenter'].forEach(function(ev){
+      el.addEventListener(ev,function(e){
+        e.preventDefault();
+        if(e.dataTransfer) e.dataTransfer.dropEffect='copy';
+        addTa.classList.add('dropping');
+        if(addPanel) addPanel.classList.add('dropping');
+      });
+    });
+    ['dragleave','dragend'].forEach(function(ev){
+      el.addEventListener(ev,function(){
+        addTa.classList.remove('dropping');
+        if(addPanel) addPanel.classList.remove('dropping');
+      });
+    });
+    el.addEventListener('drop',onDrop);
+  }
+  wireDrop(addTa);      // 输入框本体
+  wireDrop(addPanel);   // 整个面板(拖不中小框时的兜底)
+
   var addGo=document.getElementById('add-go');
   if(addGo) addGo.addEventListener('click',function(){
     var ta=document.getElementById('add-ta');
@@ -1034,12 +1115,15 @@ def build_report(rows, changes_map, errors, run_meta, updates, keep, g=None):
                  "<span style='font-size:12.5px;color:#8b94a7'>点条目=标已读;未读琥珀高亮,状态存浏览器本地</span>"
                  "</div>")
 
-    # ---- 批量添加面板(逗号/换行分隔多链接) ----
+    # ---- 批量添加面板(逗号/换行分隔多链接; 支持拖拽, FR-18 预筛复用) ----
     parts.append(
         "<div class='panel' id='p-add'><h3>批量添加链接</h3>"
-        "<textarea id='add-ta' spellcheck='false' placeholder='把链接粘进来,用逗号分隔,可一次多个。&#10;&#10;例:"
+        "<textarea id='add-ta' spellcheck='false' placeholder='把链接粘进来,用逗号或换行分隔,可一次多个。"
+        "也可以直接把浏览器标签页/链接拖进这个框。&#10;&#10;例:"
         " https://x.com/someone/status/123, https://x.com/another, https://store.steampowered.com/app/12345&#10;&#10;"
         "支持: X帖子链接 / X裸主页 / Steam页 / DLsite页; 也支持逗号+换行混排'></textarea>"
+        "<div class='drophint'>💡 直接把浏览器里选中的标签页拖进上面输入框 — "
+        "自动识别其中的网址(拖单个标签最稳; 多选拖入取决于浏览器, 只进来一个就用扩展或复制粘贴)</div>"
         "<div class='row'>"
         "<button class='btn' id='add-go'>开始添加</button>"
         "<button class='btn' id='add-log-btn'>查看后台日志</button>"
